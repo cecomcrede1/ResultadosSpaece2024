@@ -1,7 +1,7 @@
 """
 Aplicação Streamlit para Consulta e Análise de Dados SPAECE
 
-Esta aplicação permite consultar dados da API SPAECE (Sistema Permanente de Avaliação da Educação Básica do Ceará)
+Esta aplicação permite consultar dados do SPAECE (Sistema Permanente de Avaliação da Educação Básica do Ceará)
 e realizar análises visuais dos dados de proficiência, participação, desempenho e habilidades dos estudantes.
 
 Funcionalidades principais:
@@ -147,7 +147,7 @@ except Exception as e:
 
 # Configuração da página
 st.set_page_config(
-    page_title="Consulta API SPAECE", 
+    page_title="Resultados SPAECE 2024 - CREDE 1", 
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
