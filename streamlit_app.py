@@ -1384,6 +1384,12 @@ else:
         
         # Só aplicar quebra de página se houver dados válidos após processamento
         if not df_participacao.empty:
+            # Quebra de página antes da seção de participação
+            st.markdown("""
+            <div style="page-break-before: always; break-before: page;">
+            </div>
+            """, unsafe_allow_html=True)
+            
             st.markdown("""
             <div class="report-header same-page-section" style="background: #2ca02c;">
                 📊 TAXA DE PARTICIPAÇÃO
