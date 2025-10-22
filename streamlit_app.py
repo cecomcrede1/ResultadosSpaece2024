@@ -1,7 +1,7 @@
 """
 Aplicação Streamlit para Consulta e Análise de Dados SPAECE
 
-Esta aplicação permite consultar dados do SPAECE (Sistema Permanente de Avaliação da Educação Básica do Ceará)
+Esta aplicação permite consultar dados da API SPAECE (Sistema Permanente de Avaliação da Educação Básica do Ceará)
 e realizar análises visuais dos dados de proficiência, participação, desempenho e habilidades dos estudantes.
 
 Funcionalidades principais:
@@ -24,7 +24,1665 @@ import json
 import base64
 import plotly.graph_objects as go
 import plotly.express as px
+from datetime import datetime
+
+# Paleta de cores personalizada
+PALETA_CORES = [
+    "#26a737",  # Verde médio vibrante
+    "#f59c00",  # Laranja forte / dourado
+    "#e94f0e",  # Laranja avermelhado intenso
+    "#5db12f",  # Verde claro natural
+    "#46ac33",  # Verde médio
+    "#45b16e",  # Verde esmeralda suave
+    "#e06a0c",  # Laranja queimado
+    "#e4a500",  # Amarelo-ouro escuro
+    "#2db39e",  # Verde água / turquesa
+    "#fccf05"   # Amarelo vibrante
+]
+
+# Cores principais do sistema
+COR_PRIMARIA = PALETA_CORES[0]  # Verde médio vibrante
+COR_SECUNDARIA = PALETA_CORES[1]  # Laranja forte / dourado
+COR_ACENTO = PALETA_CORES[2]  # Laranja avermelhado intenso
+COR_SUCESSO = PALETA_CORES[3]  # Verde claro natural
+COR_AVISO = PALETA_CORES[4]  # Verde médio
+COR_INFO = PALETA_CORES[5]  # Verde esmeralda suave
+COR_DANGER = PALETA_CORES[6]  # Laranja queimado
+COR_WARNING = PALETA_CORES[7]  # Amarelo-ouro escuro
+COR_LIGHT = PALETA_CORES[8]  # Verde água / turquesa
+COR_BRIGHT = PALETA_CORES[9]  # Amarelo vibrante
+
+import io
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 from config_api import API_URL, INDICADORES, HEADERS, criar_payload
+
+# ==================== FUNÇÃO DE PROCESSAMENTO DE MARKDOWN COM RAG ====================
+
+def extrair_texto_md(caminho_arquivo):
+    """
+    Extrai texto de um arquivo Markdown (.md)
+    """
+    try:
+        with open(caminho_arquivo, 'r', encoding='utf-8') as arquivo:
+            texto_completo = arquivo.read()
+        return texto_completo
+    except Exception as e:
+        st.error(f"Erro ao processar arquivo Markdown {caminho_arquivo}: {e}")
+        return None
+
+def processar_md_com_rag(texto_md):
+    """
+    Processa o arquivo Markdown usando técnicas de RAG para extrair informações relevantes
+    """
+    try:
+        # Dividir o texto em chunks menores para melhor processamento
+        chunks = dividir_em_chunks(texto_md, tamanho_chunk=1000, sobreposicao=200)
+        
+        # Extrair tabelas do final do arquivo
+        tabelas = extrair_tabelas_do_md(texto_md)
+        
+        # Extrair seções importantes
+        secoes_importantes = extrair_secoes_importantes(texto_md)
+        
+        # Criar índice de similaridade
+        indice_similaridade = criar_indice_similaridade(chunks)
+        
+        return {
+            'chunks': chunks,
+            'tabelas': tabelas,
+            'secoes_importantes': secoes_importantes,
+            'indice_similaridade': indice_similaridade,
+            'texto_completo': texto_md
+        }
+    except Exception as e:
+        st.error(f"Erro ao processar arquivo Markdown: {e}")
+        return None
+
+def dividir_em_chunks(texto, tamanho_chunk=1000, sobreposicao=200):
+    """
+    Divide o texto em chunks menores para processamento RAG
+    """
+    palavras = texto.split()
+    chunks = []
+    
+    for i in range(0, len(palavras), tamanho_chunk - sobreposicao):
+        chunk = ' '.join(palavras[i:i + tamanho_chunk])
+        if chunk.strip():
+            chunks.append({
+                'texto': chunk,
+                'indice': len(chunks),
+                'posicao_inicial': i
+            })
+    
+    return chunks
+
+def extrair_tabelas_do_md(texto_md):
+    """
+    Extrai tabelas do arquivo Markdown usando regex
+    """
+    try:
+        # Procurar por padrões de tabelas no arquivo Markdown
+        # Padrão para encontrar tabelas com dados numéricos
+        padrao_tabela = r'(\d+(?:\.\d+)?(?:\s+\d+(?:\.\d+)?)*)'
+        
+        # Dividir o texto em seções para encontrar tabelas
+        secoes = texto_md.split('\n---')
+        ultimas_secoes = secoes[-5:] if len(secoes) > 5 else secoes
+        
+        tabelas_encontradas = []
+        
+        for secao in ultimas_secoes:
+            # Procurar por padrões de tabela
+            matches = re.findall(padrao_tabela, secao)
+            if matches:
+                # Criar conteúdo da tabela com os dados encontrados
+                conteudo_tabela = f"Dados numéricos encontrados: {', '.join(matches[:10])}"
+                tabelas_encontradas.append({
+                    'conteudo': conteudo_tabela,
+                    'secao': secao[:200] + '...' if len(secao) > 200 else secao,
+                    'dados_numericos': matches[:10]  # Limitar a 10 matches por tabela
+                })
+        
+        return tabelas_encontradas
+    except Exception as e:
+        st.error(f"Erro ao extrair tabelas do Markdown: {e}")
+        return []
+
+def extrair_secoes_importantes(texto_md):
+    """
+    Extrai seções importantes do arquivo Markdown como metodologia, indicadores, etc.
+    """
+    secoes = {}
+    
+    # Padrões para encontrar seções importantes
+    padroes_secoes = {
+        'metodologia': r'(metodologia|método|procedimento)',
+        'indicadores': r'(indicador|métrica|medida)',
+        'resultados': r'(resultado|conclusão|achado)',
+        'recomendacoes': r'(recomenda|sugestão|orientação)',
+        'tabelas': r'(tabela|quadro|dados)',
+        'graficos': r'(gráfico|figura|chart)',
+        'habilidades': r'(habilidade|competência|capacidade)',
+        'componentes': r'(componente|disciplina|área)',
+        'relacoes': r'(relação|relacionamento|conexão|vinculação)',
+        'proficiencia': r'(proficiência|desempenho|rendimento)',
+        'avaliacao': r'(avaliação|teste|exame)',
+        'curriculo': r'(currículo|conteúdo|programa)',
+        'bncc_competencias': r'(competência geral|competência específica|habilidade essencial)',
+        'bncc_campos': r'(campo de experiência|área de conhecimento)',
+        'bncc_objetivos': r'(objetivo de aprendizagem|expectativa de aprendizagem)',
+        'bncc_etapas': r'(educação infantil|ensino fundamental|ensino médio)',
+        'bncc_areas': r'(linguagens|matemática|ciências|humanas)',
+        'bncc_objetivos_gerais': r'(objetivo geral|finalidade|propósito)',
+        'bncc_principios': r'(princípio|fundamento|base)',
+        'bncc_organizacao': r'(organização|estrutura|distribuição)',
+        'bncc_avaliacao': r'(avaliação formativa|avaliação diagnóstica|avaliação somativa)',
+        'dcrc_competencias_especificas': r'(competência específica|habilidade específica|descrição da habilidade)',
+        'dcrc_descricoes_habilidades': r'(descrição|caracterização|definição.*habilidade)',
+        'dcrc_relacoes_habilidades': r'(relação.*habilidade|vinculação.*competência|conexão.*componente)'
+    }
+    
+    for nome_secao, padrao in padroes_secoes.items():
+        matches = re.finditer(padrao, texto_md, re.IGNORECASE)
+        for match in matches:
+            # Extrair contexto ao redor da palavra-chave
+            inicio = max(0, match.start() - 500)
+            fim = min(len(texto_md), match.end() + 500)
+            contexto = texto_md[inicio:fim]
+            
+            if nome_secao not in secoes:
+                secoes[nome_secao] = []
+            secoes[nome_secao].append(contexto)
+    
+    return secoes
+
+def criar_indice_similaridade(chunks):
+    """
+    Cria um índice de similaridade usando TF-IDF para busca semântica
+    """
+    try:
+        if not chunks:
+            return None
+        
+        # Extrair textos dos chunks
+        textos = [chunk['texto'] for chunk in chunks]
+        
+        # Criar vetorizador TF-IDF
+        vectorizer = TfidfVectorizer(
+            max_features=1000,
+            stop_words=None,  # Manter palavras em português
+            ngram_range=(1, 2)
+        )
+        
+        # Vetorizar textos
+        tfidf_matrix = vectorizer.fit_transform(textos)
+        
+        return {
+            'vectorizer': vectorizer,
+            'tfidf_matrix': tfidf_matrix,
+            'chunks': chunks
+        }
+    except Exception as e:
+        print(f"Erro ao criar índice de similaridade: {e}")
+        return None
+
+
+def comparar_habilidades_competencias(dados_rag, nome_habilidade=""):
+    """
+    Compara descrições de habilidades com competências específicas do DCRC
+    """
+    try:
+        if not dados_rag or not dados_rag.get('secoes_importantes'):
+            return ""
+        
+        secoes = dados_rag['secoes_importantes']
+        comparacao = ""
+        
+        # Extrair competências específicas do DCRC
+        competencias_especificas = secoes.get('dcrc_competencias_especificas', [])
+        descricoes_habilidades = secoes.get('dcrc_descricoes_habilidades', [])
+        relacoes_habilidades = secoes.get('dcrc_relacoes_habilidades', [])
+        
+        if competencias_especificas or descricoes_habilidades:
+            comparacao = "\n\n===== ANÁLISE DE HABILIDADES COM BASE NAS RELAÇÕES E COMPETÊNCIAS BNCC/DCRC =====\n"
+            
+            # Adicionar competências específicas encontradas
+            if competencias_especificas:
+                comparacao += "\n🎯 COMPETÊNCIAS ESPECÍFICAS IDENTIFICADAS NOS DOCUMENTOS BNCC/DCRC:\n"
+                for i, comp in enumerate(competencias_especificas[:3], 1):
+                    # Identificar se é do BNCC ou DCRC
+                    fonte = "BNCC" if "BNCC" in comp or "Base Nacional Comum Curricular" in comp else "DCRC"
+                    comparacao += f"{i}. [{fonte}] {comp[:400]}...\n\n"
+            
+            # Adicionar descrições de habilidades
+            if descricoes_habilidades:
+                comparacao += "\n📝 DESCRIÇÕES DE HABILIDADES ENCONTRADAS NOS DOCUMENTOS BNCC/DCRC:\n"
+                for i, desc in enumerate(descricoes_habilidades[:3], 1):
+                    # Identificar se é do BNCC ou DCRC
+                    fonte = "BNCC" if "BNCC" in desc or "Base Nacional Comum Curricular" in desc else "DCRC"
+                    comparacao += f"{i}. [{fonte}] {desc[:400]}...\n\n"
+            
+            # Adicionar relações entre habilidades
+            if relacoes_habilidades:
+                comparacao += "\n🔗 RELAÇÕES ENTRE HABILIDADES IDENTIFICADAS NOS DOCUMENTOS BNCC/DCRC:\n"
+                for i, rel in enumerate(relacoes_habilidades[:2], 1):
+                    # Identificar se é do BNCC ou DCRC
+                    fonte = "BNCC" if "BNCC" in rel or "Base Nacional Comum Curricular" in rel else "DCRC"
+                    comparacao += f"{i}. [{fonte}] {rel[:400]}...\n\n"
+            
+            # Instruções específicas para análise de habilidades com foco em relações
+            comparacao += """
+🔧 INSTRUÇÕES OBRIGATÓRIAS PARA ANÁLISE DE HABILIDADES:
+
+1. PROXIMIDADE ENTRE HABILIDADES:
+   - IDENTIFIQUE habilidades que aparecem próximas nos dados
+   - ANALISE se habilidades com desempenho similar estão relacionadas
+   - EXPLIQUE por que certas habilidades têm padrões similares
+   - SUGIRA intervenções que trabalhem habilidades relacionadas juntas
+
+2. RELAÇÃO DENTRO DO PRÓPRIO COMPONENTE:
+   - FOQUE nas habilidades que pertencem ao mesmo componente
+   - IDENTIFIQUE hierarquias dentro do componente
+   - ANALISE dependências entre habilidades do mesmo componente
+   - SUGIRA sequências de ensino baseadas nas relações internas
+
+3. RELAÇÃO ENTRE COMPONENTES:
+   - MAPEIE como habilidades de diferentes componentes se conectam
+   - IDENTIFIQUE competências que dependem de múltiplos componentes
+   - ANALISE transferências de conhecimento entre componentes
+   - SUGIRA abordagens interdisciplinares baseadas nas relações
+
+4. COMPETÊNCIAS ESPECÍFICAS:
+   - RELACIONE cada habilidade com competências específicas do DCRC
+   - IDENTIFIQUE quais competências são mais críticas
+   - ANALISE lacunas entre habilidades e competências esperadas
+   - SUGIRA desenvolvimento de competências específicas
+
+5. DESCRIÇÕES DAS HABILIDADES:
+   - USE as descrições do DCRC para entender o que cada habilidade envolve
+   - COMPARE descrições com desempenho real nos dados
+   - IDENTIFIQUE habilidades mal compreendidas pelos estudantes
+   - SUGIRA reformulações pedagógicas baseadas nas descrições
+
+6. ANÁLISE INTEGRADA:
+   - COMBINE proximidade, relações e competências na análise
+   - IDENTIFIQUE padrões complexos de desempenho
+   - SUGIRA intervenções sistêmicas baseadas nas relações
+   - MONITORE progresso considerando as interconexões
+"""
+        
+        return comparacao
+    except Exception as e:
+        print(f"Erro na comparação habilidades-competências: {e}")
+        return ""
+
+def analisar_percursos_aprendizado(dados_rag, nome_habilidade=""):
+    """
+    Analisa percursos de aprendizado, dependências e relações entre habilidades de forma CIRÚRGICA
+    """
+    try:
+        if not dados_rag or not dados_rag.get('indice_similaridade'):
+            return ""
+        
+        # Buscar informações específicas sobre percursos de aprendizado
+        consultas_percurso = [
+            f"percurso aprendizado progressão sequência {nome_habilidade}",
+            f"dependência pré-requisito hierarquia habilidade {nome_habilidade}",
+            f"relação conexão vinculação habilidade componente {nome_habilidade}",
+            f"competência específica objetivo aprendizagem {nome_habilidade}",
+            f"metodologia estratégia ensino habilidade {nome_habilidade}"
+        ]
+        
+        contexto_percursos = "\n\n===== ANÁLISE HIERÁRQUICA DE PERCURSOS DE APRENDIZADO =====\n"
+        
+        for consulta in consultas_percurso:
+            informacoes = buscar_informacoes_relevantes(consulta, dados_rag, top_k=3)
+            if informacoes:
+                contexto_percursos += f"\n🔍 INFORMAÇÕES SOBRE: {consulta.upper()}\n"
+                for info in informacoes:
+                    fonte = info.get('fonte', 'Documento')
+                    contexto_percursos += f"[{fonte}] {info['texto'][:300]}...\n\n"
+        
+        # Instruções HIERÁRQUICAS para análise de percursos
+        contexto_percursos += """
+🎯 INSTRUÇÕES HIERÁRQUICAS PARA ANÁLISE DE PERCURSOS DE APRENDIZADO:
+
+**ANÁLISE HIERÁRQUICA OBRIGATÓRIA - PERSPECTIVA POR NÍVEL EDUCACIONAL:**
+
+1. MAPEAMENTO HIERÁRQUICO DE DEPENDÊNCIAS:
+   - IDENTIFIQUE EXATAMENTE quais habilidades são pré-requisito para outras conforme BNCC/DCRC
+   - MAPEIE a hierarquia ESPECÍFICA: habilidades básicas → intermediárias → avançadas
+   - ANALISE habilidades "gargalo" ESPECÍFICAS que bloqueiam o desenvolvimento de outras
+   - IDENTIFIQUE habilidades que se reforçam mutuamente de forma CONCRETA
+   - SUGIRA sequências de ensino ESPECÍFICAS baseadas nas dependências identificadas
+   - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+
+2. PERCURSOS HIERÁRQUICOS ESTRUTURADOS:
+   - DESENHE percursos de aprendizado ESPECÍFICOS: quais habilidades devem ser desenvolvidas primeiro
+   - MAPEIE pontos de convergência CONCRETOS onde múltiplas habilidades se encontram
+   - IDENTIFIQUE competências ESPECÍFICAS que dependem de múltiplos componentes
+   - ANALISE transferências de conhecimento ESPECÍFICAS entre componentes
+   - SUGIRA abordagens interdisciplinares ESPECÍFICAS baseadas nos percursos
+   - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+
+3. RELAÇÕES HIERÁRQUICAS ENTRE HABILIDADES:
+   - IDENTIFIQUE habilidades que aparecem próximas nos dados ESPECÍFICOS
+   - ANALISE se habilidades com desempenho similar estão relacionadas de forma CONCRETA
+   - EXPLIQUE por que certas habilidades têm padrões similares de forma ESPECÍFICA
+   - MAPEIE como habilidades de diferentes componentes se conectam de forma CONCRETA
+   - SUGIRA intervenções ESPECÍFICAS que trabalhem habilidades relacionadas juntas
+   - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+
+4. COMPETÊNCIAS E OBJETIVOS HIERÁRQUICOS:
+   - RELACIONE cada habilidade com competências específicas do BNCC/DCRC de forma CONCRETA
+   - IDENTIFIQUE objetivos de aprendizagem ESPECÍFICOS para cada habilidade
+   - ANALISE lacunas ESPECÍFICAS entre habilidades e competências esperadas
+   - MAPEIE competências gerais da BNCC desenvolvidas através das habilidades de forma CONCRETA
+   - SUGIRA desenvolvimento de competências ESPECÍFICO baseado nos documentos
+   - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+
+5. METODOLOGIAS E ESTRATÉGIAS HIERÁRQUICAS:
+   - USE metodologias ESPECÍFICAS sugeridas nos documentos BNCC/DCRC para cada habilidade
+   - IDENTIFIQUE recursos e materiais ESPECÍFICOS recomendados nos documentos
+   - MAPEIE estratégias ESPECÍFICAS para desenvolvimento de cada habilidade
+   - SUGIRA reformulações pedagógicas ESPECÍFICAS baseadas nas descrições dos documentos
+   - IDENTIFIQUE práticas de linguagem e campos de experiência ESPECÍFICOS relevantes
+   - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+
+6. INTERVENÇÕES HIERÁRQUICAS SISTÊMICAS:
+   - DESENHE planos de ação ESPECÍFICOS baseados nos percursos de aprendizado identificados
+   - IDENTIFIQUE pontos de intervenção mais eficazes de forma CONCRETA baseado nas dependências
+   - MAPEIE como melhorar uma habilidade impacta outras habilidades de forma ESPECÍFICA
+   - SUGIRA intervenções sistêmicas ESPECÍFICAS baseadas nas relações identificadas
+   - MONITORE progresso considerando as interconexões de forma CONCRETA conforme BNCC/DCRC
+   - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+
+**REFERENCIAMENTO HIERÁRQUICO OBRIGATÓRIO:**
+- REFERENCIE SEMPRE: "Conforme a BNCC", "Segundo o DCRC", "Baseado nos percursos identificados"
+- CITE competências específicas e objetivos de aprendizagem mencionados nos documentos de forma CONCRETA
+- REFERENCIE metodologias e recursos sugeridos nos documentos de forma ESPECÍFICA
+- IDENTIFIQUE campos de experiência e práticas de linguagem dos documentos de forma CONCRETA
+- DIFERENCIE entre informações dos documentos vs. análises genéricas de forma CLARA
+- SEJA ESPECÍFICO: evite generalizações, foque nos dados específicos da entidade
+- **CITE OBRIGATORIAMENTE BNCC E DCRC**: Sempre que possível, referencie tanto a BNCC quanto o DCRC como fontes principais das metodologias, competências e diretrizes curriculares
+- **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+"""
+        
+        return contexto_percursos
+        
+    except Exception as e:
+        print(f"Erro na análise de percursos de aprendizado: {e}")
+        return ""
+
+def gerar_analise_personalizada(dados_rag, df_info, nome_grafico, contexto_especifico=""):
+    """
+    Gera análise personalizada baseada nos dados específicos da entidade e gráfico
+    """
+    try:
+        if not dados_rag or not dados_rag.get('secoes_importantes'):
+            return ""
+        
+        secoes = dados_rag['secoes_importantes']
+        analise_personalizada = ""
+        
+        # Extrair dados específicos do DataFrame
+        estatisticas = df_info.get('estatisticas', {})
+        amostra_dados = df_info.get('amostra_dados', [])
+        debug_info = df_info.get('debug_info', {})
+        
+        # Identificar padrões específicos nos dados
+        padroes_identificados = []
+        if estatisticas:
+            for coluna, stats in estatisticas.items():
+                if isinstance(stats, dict):
+                    if 'mean' in stats and stats['mean'] < 50:
+                        padroes_identificados.append(f"Baixo desempenho em {coluna} (média: {stats['mean']:.1f})")
+                    elif 'mean' in stats and stats['mean'] > 80:
+                        padroes_identificados.append(f"Alto desempenho em {coluna} (média: {stats['mean']:.1f})")
+        
+        # Extrair recomendações específicas dos documentos DCRC + BNCC
+        recomendacoes = secoes.get('recomendacoes', [])
+        metodologia = secoes.get('metodologia', [])
+        bncc_competencias = secoes.get('bncc_competencias', [])
+        bncc_objetivos = secoes.get('bncc_objetivos', [])
+        dcrc_competencias_especificas = secoes.get('dcrc_competencias_especificas', [])
+        dcrc_descricoes_habilidades = secoes.get('dcrc_descricoes_habilidades', [])
+        
+        if padroes_identificados or recomendacoes or metodologia:
+            analise_personalizada = "\n\n===== ANÁLISE PERSONALIZADA COM BASE NOS DOCUMENTOS DCRC + BNCC =====\n"
+            
+            # Padrões identificados nos dados
+            if padroes_identificados:
+                analise_personalizada += "\n🔍 PADRÕES IDENTIFICADOS NOS DADOS:\n"
+                for padrao in padroes_identificados[:5]:
+                    analise_personalizada += f"• {padrao}\n"
+            
+            # Informações específicas dos documentos encontradas
+            if recomendacoes or metodologia or bncc_competencias or dcrc_competencias_especificas:
+                analise_personalizada += "\n📚 INFORMAÇÕES ESPECÍFICAS DOS DOCUMENTOS ENCONTRADAS:\n"
+                
+                if recomendacoes:
+                    analise_personalizada += f"• DCRC - Recomendações: {len(recomendacoes)} seções encontradas\n"
+                if metodologia:
+                    analise_personalizada += f"• DCRC - Metodologia: {len(metodologia)} seções encontradas\n"
+                if bncc_competencias:
+                    analise_personalizada += f"• BNCC - Competências: {len(bncc_competencias)} seções encontradas\n"
+                if dcrc_competencias_especificas:
+                    analise_personalizada += f"• DCRC - Competências Específicas: {len(dcrc_competencias_especificas)} seções encontradas\n"
+                if dcrc_descricoes_habilidades:
+                    analise_personalizada += f"• DCRC - Descrições de Habilidades: {len(dcrc_descricoes_habilidades)} seções encontradas\n"
+            
+            # Recomendações específicas baseadas nos padrões E documentos
+            if padroes_identificados:
+                analise_personalizada += "\n💡 RECOMENDAÇÕES ESPECÍFICAS (BASEADAS NOS DOCUMENTOS):\n"
+                for padrao in padroes_identificados[:3]:
+                    if "Baixo desempenho" in padrao:
+                        analise_personalizada += f"• Para {padrao}: Implementar intervenção pedagógica específica baseada nas competências específicas do DCRC identificadas\n"
+                    elif "Alto desempenho" in padrao:
+                        analise_personalizada += f"• Para {padrao}: Manter e expandir práticas exitosas, compartilhar com outras áreas usando metodologias do DCRC\n"
+            
+            # Ações específicas baseadas no tipo de gráfico, dados E documentos
+            if 'habilidade' in nome_grafico.lower():
+                analise_personalizada += """
+🎯 AÇÕES ESPECÍFICAS PARA HABILIDADES (BASEADAS NOS DOCUMENTOS):
+• Analisar quais habilidades específicas têm baixo desempenho nos dados
+• Criar planos de intervenção direcionados usando as competências específicas do DCRC
+• Desenvolver atividades práticas baseadas nas descrições de habilidades do DCRC
+• Estabelecer grupos de estudo focados nas habilidades com menor desempenho
+• Monitorar progresso usando indicadores específicos do DCRC
+• Alinhar com competências gerais e específicas da BNCC identificadas
+"""
+            elif 'proficiência' in nome_grafico.lower():
+                analise_personalizada += """
+📊 AÇÕES ESPECÍFICAS PARA PROFICIÊNCIA (BASEADAS NOS DOCUMENTOS):
+• Identificar níveis de proficiência específicos nos dados
+• Criar planos de intervenção usando metodologias do DCRC
+• Estabelecer metas de proficiência baseadas nos objetivos da BNCC
+• Implementar avaliação formativa contínua com foco nas competências específicas
+• Desenvolver estratégias de recuperação baseadas nas recomendações do DCRC
+• Alinhar com campos de experiência da BNCC identificados
+"""
+            elif 'participação' in nome_grafico.lower():
+                analise_personalizada += """
+👥 AÇÕES ESPECÍFICAS PARA PARTICIPAÇÃO (BASEADAS NOS PDFs):
+• Analisar taxa de participação específica nos dados
+• Identificar fatores que impactam a participação usando metodologias do DCRC
+• Criar estratégias de engajamento baseadas nos princípios da BNCC
+• Estabelecer parcerias com famílias usando orientações do DCRC
+• Monitorar participação com indicadores específicos do DCRC
+• Alinhar com objetivos de aprendizagem da BNCC
+"""
+            
+            # Instruções específicas para análise personalizada COM PDFs
+            analise_personalizada += """
+🔧 INSTRUÇÕES PARA ANÁLISE PERSONALIZADA COM PDFs:
+1. FOQUE nos dados específicos da entidade analisada
+2. IDENTIFIQUE padrões únicos nos dados apresentados
+3. RELACIONE os dados com as competências específicas do DCRC encontradas
+4. SUGIRA ações baseadas nos dados reais E nas informações dos PDFs
+5. CONSIDERE o contexto específico da entidade
+6. MONITORE indicadores específicos identificados nos dados
+7. ADAPTE as ações conforme os dados específicos E os PDFs
+8. AVALIE o progresso com base nos dados apresentados E nas metodologias do DCRC
+9. REFERENCIE explicitamente as informações dos PDFs nas análises
+10. DIFERENCIE claramente quando está usando informações dos PDFs vs. análises genéricas
+"""
+        
+        return analise_personalizada
+    except Exception as e:
+        print(f"Erro na geração de análise personalizada: {e}")
+        return ""
+
+def gerar_acoes_escola_baseadas_pdfs(dados_rag, tipo_grafico, contexto_especifico=""):
+    """
+    Gera ações específicas que a escola deve tomar baseadas nos PDFs, com foco na educação básica
+    """
+    try:
+        if not dados_rag or not dados_rag.get('secoes_importantes'):
+            return ""
+        
+        secoes = dados_rag['secoes_importantes']
+        acoes_escola = ""
+        
+        # Extrair recomendações e orientações dos PDFs
+        recomendacoes = secoes.get('recomendacoes', [])
+        metodologia = secoes.get('metodologia', [])
+        bncc_competencias = secoes.get('bncc_competencias', [])
+        bncc_objetivos = secoes.get('bncc_objetivos', [])
+        bncc_principios = secoes.get('bncc_principios', [])
+        
+        if recomendacoes or metodologia or bncc_competencias:
+            acoes_escola = "\n\n===== AÇÕES ESPECÍFICAS PARA A ESCOLA (BASEADAS NOS PDFs) =====\n"
+            
+            # Ações baseadas no DCRC
+            if recomendacoes or metodologia:
+                acoes_escola += "\n📋 AÇÕES BASEADAS NO DCRC:\n"
+                if recomendacoes:
+                    for i, rec in enumerate(recomendacoes[:2], 1):
+                        acoes_escola += f"• {rec[:300]}...\n"
+                if metodologia:
+                    for i, met in enumerate(metodologia[:2], 1):
+                        acoes_escola += f"• {met[:300]}...\n"
+            
+            # Ações baseadas na BNCC
+            if bncc_competencias or bncc_objetivos:
+                acoes_escola += "\n📚 AÇÕES BASEADAS NA BNCC:\n"
+                if bncc_competencias:
+                    for i, comp in enumerate(bncc_competencias[:2], 1):
+                        acoes_escola += f"• {comp[:300]}...\n"
+                if bncc_objetivos:
+                    for i, obj in enumerate(bncc_objetivos[:2], 1):
+                        acoes_escola += f"• {obj[:300]}...\n"
+            
+            # Ações específicas por tipo de gráfico
+            if 'habilidade' in tipo_grafico.lower():
+                acoes_escola += """
+🎯 AÇÕES ESPECÍFICAS PARA HABILIDADES:
+• Implementar atividades práticas baseadas nas competências específicas do DCRC
+• Criar sequências didáticas que desenvolvam habilidades inter-relacionadas
+• Estabelecer momentos de reflexão sobre o desenvolvimento das competências
+• Organizar grupos de estudo para habilidades com baixo desempenho
+• Desenvolver materiais didáticos alinhados com as competências da BNCC
+"""
+            elif 'proficiência' in tipo_grafico.lower():
+                acoes_escola += """
+📊 AÇÕES ESPECÍFICAS PARA PROFICIÊNCIA:
+• Alinhar práticas pedagógicas com os objetivos de aprendizagem da BNCC
+• Implementar avaliação formativa contínua baseada nas competências
+• Criar planos de intervenção para níveis de proficiência críticos
+• Estabelecer metas de proficiência por competência específica
+• Desenvolver estratégias de recuperação baseadas nas competências
+"""
+            elif 'participação' in tipo_grafico.lower():
+                acoes_escola += """
+👥 AÇÕES ESPECÍFICAS PARA PARTICIPAÇÃO:
+• Implementar estratégias de engajamento baseadas nos princípios da BNCC
+• Criar ambientes de aprendizagem que promovam participação ativa
+• Desenvolver atividades que conectem com os campos de experiência
+• Estabelecer parcerias com famílias baseadas nas orientações do DCRC
+• Organizar momentos de protagonismo estudantil
+"""
+            
+            # Instruções específicas para ações práticas
+            acoes_escola += """
+🔧 INSTRUÇÕES PARA IMPLEMENTAÇÃO:
+1. PRIORIZE: Ações que desenvolvam competências básicas fundamentais
+2. SEQUENCIE: Implemente ações em ordem de complexidade crescente
+3. MONITORE: Acompanhe o progresso baseado nas competências específicas
+4. ADAPTE: Ajuste as ações conforme o contexto da escola
+5. COLABORE: Envolva toda a comunidade escolar nas ações
+6. DOCUMENTE: Registre as ações e seus resultados
+7. AVALIE: Use os indicadores do DCRC para avaliar o progresso
+8. REFLITA: Promova reflexão coletiva sobre as práticas implementadas
+"""
+        
+        return acoes_escola
+    except Exception as e:
+        print(f"Erro na geração de ações para escola: {e}")
+        return ""
+
+def buscar_informacoes_relevantes(consulta, dados_rag, top_k=5):
+    """
+    Busca informações relevantes no PDF usando RAG
+    """
+    try:
+        if not dados_rag or not dados_rag.get('indice_similaridade'):
+            return []
+        
+        indice = dados_rag['indice_similaridade']
+        vectorizer = indice['vectorizer']
+        tfidf_matrix = indice['tfidf_matrix']
+        chunks = indice['chunks']
+        
+        # Expandir consulta com termos relacionados específicos
+        if 'habilidade' in consulta.lower() or 'competência' in consulta.lower():
+            consulta_expandida = f"{consulta} habilidade competência capacidade componente relação entre componentes proximidade habilidades SPAECE DCRC BNCC avaliação proficiência competência geral competência específica habilidade essencial descrição da habilidade caracterização habilidade específica vinculação competência conexão componente relação dentro próprio componente competências específicas descrições habilidades relações habilidades objeto de conhecimento campo de experiência prática de linguagem percurso aprendizado progressão sequência dependência pré-requisito hierarquia metodologia estratégia ensino objetivo aprendizagem expectativa aprendizagem direito aprendizagem base nacional comum curricular documento curricular referencial"
+        elif 'proficiência' in consulta.lower() or 'desempenho' in consulta.lower():
+            consulta_expandida = f"{consulta} proficiência desempenho rendimento SPAECE DCRC BNCC avaliação competência objetivo de aprendizagem competência específica"
+        elif 'participação' in consulta.lower():
+            consulta_expandida = f"{consulta} participação frequência presença SPAECE DCRC BNCC educação básica"
+        else:
+            consulta_expandida = f"{consulta} educação avaliação SPAECE DCRC BNCC metodologia indicadores competência geral competência específica habilidade essencial descrição habilidade"
+        
+        # Vetorizar a consulta
+        consulta_vector = vectorizer.transform([consulta_expandida])
+        
+        # Calcular similaridade
+        similaridades = cosine_similarity(consulta_vector, tfidf_matrix).flatten()
+        
+        # Obter top-k resultados mais similares
+        top_indices = np.argsort(similaridades)[::-1][:top_k]
+        
+        resultados = []
+        for idx in top_indices:
+            if similaridades[idx] > 0.05:  # Threshold mais baixo para capturar mais informações
+                chunk_texto = chunks[idx]['texto']
+                # Identificar se o chunk é do BNCC ou DCRC
+                if "BNCC" in chunk_texto or "Base Nacional Comum Curricular" in chunk_texto or "BNCC_20dez_site" in chunk_texto:
+                    fonte_documento = "BNCC"
+                elif "DCRC" in chunk_texto or "Documento Curricular Referencial" in chunk_texto or "dcrc" in chunk_texto.lower():
+                    fonte_documento = "DCRC"
+                else:
+                    # Se não conseguir identificar, usar contexto do texto combinado
+                    # Alternar entre BNCC e DCRC para dar equilíbrio
+                    fonte_documento = "BNCC" if idx % 2 == 0 else "DCRC"
+                
+                resultados.append({
+                    'chunk': chunks[idx],
+                    'similaridade': similaridades[idx],
+                    'texto': chunk_texto,
+                    'fonte': fonte_documento
+                })
+        
+        # Busca específica para habilidades e relações com foco em BNCC e DCRC
+        if 'habilidade' in consulta.lower() or 'competência' in consulta.lower():
+            palavras_habilidade = ['habilidade', 'competência', 'capacidade', 'componente', 'relação', 'vinculação', 'conexão', 'descrição', 'caracterização', 'específica', 'geral', 'essencial', 'dcrc', 'documento curricular', 'bncc', 'base nacional comum curricular']
+            for i, chunk in enumerate(chunks):
+                texto_chunk = chunk['texto'].lower()
+                if any(palavra in texto_chunk for palavra in palavras_habilidade):
+                    # Verificar se já não está nos resultados
+                    if not any(r['chunk']['indice'] == chunk['indice'] for r in resultados):
+                        # Identificar fonte para habilidades
+                        if "BNCC" in chunk['texto'] or "Base Nacional Comum Curricular" in chunk['texto']:
+                            fonte_habilidade = "BNCC"
+                        elif "DCRC" in chunk['texto'] or "Documento Curricular Referencial" in chunk['texto']:
+                            fonte_habilidade = "DCRC"
+                        else:
+                            # Alternar entre BNCC e DCRC para dar equilíbrio
+                            fonte_habilidade = "BNCC" if i % 2 == 0 else "DCRC"
+                        
+                        resultados.append({
+                            'chunk': chunk,
+                            'similaridade': 0.4,  # Similaridade alta para habilidades
+                            'texto': chunk['texto'],
+                            'fonte': fonte_habilidade
+                        })
+                        if len(resultados) >= top_k * 2:  # Mais resultados para habilidades
+                            break
+        
+        # Se não encontrou resultados específicos, buscar por palavras-chave gerais
+        if not resultados:
+            palavras_chave = consulta.lower().split()
+            for i, chunk in enumerate(chunks):
+                texto_chunk = chunk['texto'].lower()
+                if any(palavra in texto_chunk for palavra in palavras_chave):
+                    resultados.append({
+                        'chunk': chunk,
+                        'similaridade': 0.3,  # Similaridade artificial para palavras-chave
+                        'texto': chunk['texto']
+                    })
+                    if len(resultados) >= top_k:
+                        break
+        
+        return resultados
+    except Exception as e:
+        print(f"Erro na busca RAG: {e}")
+        return []
+
+def analisar_pdf_com_rag_groq(dados_rag, contexto_analise="", consulta_especifica=""):
+    """
+    Analisa o PDF usando RAG + Groq para encontrar informações específicas
+    """
+    try:
+        # Configurar a API do Groq
+        groq_api_key = st.secrets.get("GROQ_API_KEY")
+        if not groq_api_key:
+            return "❌ Chave da API Groq não configurada"
+        
+        headers = {
+            "Authorization": f"Bearer {groq_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Buscar informações relevantes usando RAG
+        if consulta_especifica:
+            informacoes_relevantes = buscar_informacoes_relevantes(consulta_especifica, dados_rag, top_k=3)
+            contexto_rag = "\n\n".join([info['texto'] for info in informacoes_relevantes])
+        else:
+            # Usar seções importantes como contexto
+            contexto_rag = ""
+            for secao, conteudos in dados_rag.get('secoes_importantes', {}).items():
+                contexto_rag += f"\n=== {secao.upper()} ===\n"
+                contexto_rag += "\n".join(conteudos[:2])  # Primeiros 2 conteúdos de cada seção
+        
+        # Extrair tabelas para análise
+        tabelas_contexto = ""
+        if dados_rag.get('tabelas'):
+            tabelas_contexto = "\n=== TABELAS E DADOS NUMÉRICOS ===\n"
+            for i, tabela in enumerate(dados_rag['tabelas'][:3]):  # Primeiras 3 tabelas
+                if isinstance(tabela, dict) and 'conteudo' in tabela:
+                    tabelas_contexto += f"\nTabela {i+1}:\n{tabela['conteudo']}\n"
+                else:
+                    # Fallback para outras estruturas de tabela
+                    conteudo_fallback = str(tabela) if tabela else "Sem conteúdo"
+                    tabelas_contexto += f"\nTabela {i+1}:\n{conteudo_fallback}\n"
+        
+        # Preparar prompt otimizado com RAG
+        prompt = f"""
+        Analise os documentos BNCC e DCRC usando as informações mais relevantes encontradas:
+
+        CONTEXTO DA ANÁLISE: {contexto_analise}
+
+        INFORMAÇÕES RELEVANTES ENCONTRADAS NOS DOCUMENTOS BNCC E DCRC:
+        {contexto_rag[:4000]}
+
+        {tabelas_contexto[:2000]}
+
+        INSTRUÇÕES CRÍTICAS - USE OBRIGATORIAMENTE OS DOCUMENTOS BNCC E DCRC:
+        1. **FUNDAMENTE SUAS RESPOSTAS** exclusivamente nas informações dos documentos BNCC e DCRC apresentados acima
+        2. **REFERENCIE EXPLICITAMENTE** quando usar informações do BNCC ("conforme a BNCC") ou DCRC ("segundo o DCRC")
+        3. **CITE COMPETÊNCIAS ESPECÍFICAS** mencionadas nos documentos quando relevante
+        4. **USE OBJETIVOS DE APRENDIZAGEM** e expectativas de aprendizagem dos documentos
+        5. **RELACIONE COM CAMPOS DE EXPERIÊNCIA** e áreas de conhecimento da BNCC
+        6. **APLIQUE METODOLOGIAS** sugeridas no DCRC para intervenções pedagógicas
+        7. **CONSIDERE PRINCÍPIOS** e fundamentos da BNCC em suas recomendações
+        8. **IDENTIFIQUE LACUNAS** entre desempenho atual e expectativas dos documentos
+        9. **SUGIRA AÇÕES** baseadas nas diretrizes curriculares apresentadas
+        10. **EVITE ANÁLISES GENÉRICAS** - seja específico com base nos documentos
+
+        ESTRUTURA OBRIGATÓRIA DA RESPOSTA:
+        1. **Fundamentação Documental**: Cite especificamente trechos dos documentos BNCC/DCRC
+        2. **Análise Curricular**: Relacione os dados com competências e habilidades dos documentos
+        3. **Recomendações Baseadas em Evidências**: Use metodologias dos documentos
+        4. **Ações Pedagógicas Específicas**: Baseadas nas diretrizes curriculares
+        5. **Indicadores de Progressão**: Alinhados com expectativas de aprendizagem
+
+        IMPORTANTE: Sua análise deve ser fundamentada EXCLUSIVAMENTE nos documentos BNCC e DCRC apresentados. Evite análises genéricas ou baseadas em conhecimento geral.
+
+        Responda em português brasileiro de forma clara, objetiva e acionável.
+        """
+        
+        data = {
+            "model": "llama3-8b-8192",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Você é um especialista em análise de dados educacionais e avaliação da educação básica. Sua função é analisar dados SPAECE fundamentando-se EXCLUSIVAMENTE nos documentos BNCC (Base Nacional Comum Curricular) e DCRC (Documento Curricular Referencial do Ceará) fornecidos. Você deve citar explicitamente trechos dos documentos, referenciar competências específicas, habilidades e metodologias mencionadas nos documentos. Evite análises genéricas - seja específico e fundamentado nos documentos curriculares apresentados."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.7
+        }
+        
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        else:
+            return f"❌ Erro na API Groq: {response.status_code} - {response.text}"
+            
+    except Exception as e:
+        return f"❌ Erro na análise RAG do PDF: {str(e)}"
+
+def analisar_pdf_com_groq(texto_pdf, contexto_analise=""):
+    """
+    Analisa o conteúdo de um PDF usando Groq (versão simples)
+    """
+    try:
+        # Configurar a API do Groq
+        groq_api_key = st.secrets.get("GROQ_API_KEY")
+        if not groq_api_key:
+            return "❌ Chave da API Groq não configurada"
+        
+        headers = {
+            "Authorization": f"Bearer {groq_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Preparar prompt para análise do PDF
+        prompt = f"""
+        Analise o seguinte documento PDF e forneça insights relevantes para análise educacional:
+
+        CONTEXTO DA ANÁLISE: {contexto_analise}
+
+        CONTEÚDO DO PDF:
+        {texto_pdf[:8000]}  # Limitar tamanho para evitar token limit
+
+        Por favor, forneça:
+        1. Resumo dos principais pontos do documento
+        2. Métricas e indicadores mencionados
+        3. Recomendações ou insights educacionais
+        4. Padrões ou tendências identificadas
+        5. Sugestões para análise de dados SPAECE baseadas no documento
+
+        Responda em português brasileiro de forma clara e objetiva.
+        """
+        
+        data = {
+            "model": "llama3-8b-8192",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Você é um especialista em análise de dados educacionais e avaliação da educação básica. Sua função é analisar dados SPAECE fundamentando-se EXCLUSIVAMENTE nos documentos BNCC (Base Nacional Comum Curricular) e DCRC (Documento Curricular Referencial do Ceará) fornecidos. Você deve citar explicitamente trechos dos documentos, referenciar competências específicas, habilidades e metodologias mencionadas nos documentos. Evite análises genéricas - seja específico e fundamentado nos documentos curriculares apresentados."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.7
+        }
+        
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        else:
+            return f"❌ Erro na API Groq: {response.status_code} - {response.text}"
+            
+    except Exception as e:
+        return f"❌ Erro na análise do PDF: {str(e)}"
+
+# ==================== FUNÇÃO PARA OBTER CONTEXTO DOS BANNERS ====================
+
+def obter_contexto_seduc_spaece():
+    """
+    Retorna contexto específico da SEDUC-CE e SPAECE para fundamentar análises
+    """
+    return """
+    CONTEXTO SEDUC-CE E SPAECE - FUNDAMENTAÇÃO DAS ANÁLISES:
+    
+    **SISTEMA PERMANENTE DE AVALIAÇÃO DA EDUCAÇÃO BÁSICA DO CEARÁ (SPAECE):**
+    - Criado em 1992, é um dos sistemas de avaliação mais antigos e consolidados do Brasil
+    - Avalia anualmente estudantes do 2º, 5º e 9º anos do Ensino Fundamental e 3ª série do Ensino Médio
+    - Foco nas disciplinas de Língua Portuguesa e Matemática
+    - Utiliza escalas de proficiência: 500 pontos (2º ano) e 1000 pontos (5º, 9º anos e 3ª série EM)
+    - Padrões de Desempenho: Crítico, Intermediário, Adequado (5º e 9º anos)
+    - Padrões de Desempenho 2º ano: Não Alfabetizado, Alfabetização Incompleta, Intermediário, Suficiente, Desejável
+    
+    **PROGRAMA DE ALFABETIZAÇÃO NA IDADE CERTA (PAIC):**
+    - Implementado desde 2007, é referência nacional em alfabetização
+    - Foco na alfabetização até o 2º ano do Ensino Fundamental
+    - Estrutura: 5 eixos (Gestão Municipal, Gestão Escolar, Avaliação, Formação de Professores, Material Didático)
+    - Resultado: Ceará saltou de 22º para 1º lugar no IDEB entre 2005-2017
+    
+    **POLÍTICAS EDUCACIONAIS DO CEARÁ:**
+    - Bônus por Resultado: Sistema de premiação baseado em desempenho
+    - Aprender Pra Valer: Programa de fortalecimento da aprendizagem
+    - Mais Paic: Expansão do PAIC para o 3º ao 5º ano
+    - Jovem de Futuro: Parceria com Instituto Unibanco para Ensino Médio
+    
+    **INDICADORES DE REFERÊNCIA DO CEARÁ:**
+    - IDEB 2021: 4º lugar nacional (5º ano: 6,4; 9º ano: 5,1; EM: 4,2)
+    - Taxa de Aprovação: 95,2% (5º ano), 92,8% (9º ano)
+    - Taxa de Abandono: 0,8% (5º ano), 2,1% (9º ano)
+    - Proficiência Média SPAECE 2022: 5º ano LP: 225,8; MAT: 230,1
+    - Proficiência Média SPAECE 2022: 9º ano LP: 275,3; MAT: 280,7
+    
+    **BENEFÍCIOS DA ALTA PARTICIPAÇÃO NO SPAECE:**
+    - **Recursos Financeiros:** Municípios com alta participação podem receber mais recursos do FUNDEB e programas federais
+    - **Melhoria da Estrutura:** Escolas com boa participação são priorizadas em investimentos em infraestrutura
+    - **Planos de Carreira:** Altas taxas de participação servem de subsídio para implementar planos de cargos e carreiras
+    - **Aumento Salarial:** Professores de escolas com boa participação podem ter aumentos salariais baseados em resultados
+    - **Programas Especiais:** Acesso a programas como PAIC, Mais Paic e outros baseados em indicadores de qualidade
+    - **Reputação Educacional:** Municípios com alta participação ganham reconhecimento e atraem mais investimentos
+    - **IDEB Elevado:** Participação alta contribui para melhor IDEB, resultando em mais recursos e prestígio
+    - **Políticas Públicas:** Dados de alta participação fundamentam políticas educacionais e alocação de recursos
+    
+    **METAS E PADRÕES DE REFERÊNCIA:**
+    - Meta IDEB 2024: 5º ano: 6,5; 9º ano: 5,2; EM: 4,3
+    - Padrão Adequado SPAECE: 5º ano LP: ≥200; MAT: ≥225
+    - Padrão Adequado SPAECE: 9º ano LP: ≥275; MAT: ≥300
+    - Taxa de Participação Mínima: 80% (crítico), 90% (adequado), **100% (IDEAL)**
+    - **Meta de Participação Ideal:** 100% - máxima participação garante dados representativos e traz benefícios
+    
+    **CARACTERÍSTICAS SOCIOECONÔMICAS DO CEARÁ:**
+    - População: 9,2 milhões de habitantes
+    - PIB per capita: R$ 15.847 (2021)
+    - Índice de Desenvolvimento Humano: 0,754 (2010)
+    - Taxa de Pobreza: 25,8% (2021)
+    - 184 municípios, 20 CREDEs (Coordenadorias Regionais de Desenvolvimento da Educação)
+    
+    **FATORES DE SUCESSO EDUCACIONAL:**
+    - Continuidade das políticas públicas (16 anos de PAIC)
+    - Foco na alfabetização e anos iniciais
+    - Sistema de avaliação permanente e diagnóstico
+    - Formação continuada de professores
+    - Material didático específico e contextualizado
+    - Gestão baseada em resultados e evidências
+    - Parceria Estado-Municípios (regime de colaboração)
+    
+    **DESAFIOS ATUAIS:**
+    - Redução do abandono escolar no Ensino Médio
+    - Melhoria da proficiência em Matemática
+    - Equidade entre regiões e grupos sociais
+    - Impacto da pandemia na aprendizagem
+    - Formação de professores em áreas específicas
+    - Infraestrutura escolar em municípios menores
+    
+    **FONTES OFICIAIS:**
+    - Site SEDUC-CE: https://www.seduc.ce.gov.br/
+    - Portal SPAECE: https://spaece.seduc.ce.gov.br/
+    - Relatórios anuais de resultados SPAECE
+    - Documentos do PAIC e programas correlatos
+    - Estatísticas educacionais do INEP/MEC
+    """
+
+def obter_contexto_banner(nome_grafico):
+    """
+    Retorna o contexto específico do banner 'Como analisar este gráfico' para nortear a análise IA
+    """
+    contextos = {
+        "Taxa de Participação": """
+        **CONTEXTO TÉCNICO DO GRÁFICO DE PARTICIPAÇÃO:**
+        - Tipo: Gauge (medidor circular) com escala de 0% a 100%
+        - Cores: Verde (90-100%), Amarelo (80-89%), Vermelho (<80%)
+        - Fórmula: Taxa de participação = (Alunos Efetivos ÷ Alunos Previstos) × 100
+        - Interpretação: Ponteiro indica taxa atual, zonas coloridas mostram classificação
+        - Significado: Percentual de alunos que efetivamente participaram da avaliação
+        - **Meta Ideal:** 100% de participação para garantir dados representativos e trazer benefícios
+        
+        **FOQUE APENAS NESTE GRÁFICO DE PARTICIPAÇÃO:**
+        - Analise exclusivamente os dados de taxa de participação apresentados
+        - Não mencione outros gráficos (proficiência, habilidades, desempenho, etc.)
+        - Concentre-se apenas nos dados de participação e seus benefícios
+        
+        BENEFÍCIOS DA ALTA PARTICIPAÇÃO:
+        - Recursos financeiros para o município (FUNDEB, programas federais)
+        - Melhoria da estrutura escolar (priorização em investimentos)
+        - Subsídio para planos de cargos e carreiras dos profissionais
+        - Aumento salarial baseado em resultados
+        - Acesso a programas especiais (PAIC, Mais Paic)
+        - Reputação educacional e reconhecimento
+        - IDEB elevado e mais investimentos
+        - Fundamentação para políticas públicas educacionais
+        """,
+        
+        "Proficiência Média": """
+        **CONTEXTO TÉCNICO DO GRÁFICO DE PROFICIÊNCIA:**
+        - Tipo: Cards com métricas e banners coloridos
+        - Escalas: 500 (2º ano) e 1000 (5º e 9º anos)
+        - Cores: Verde (Adequado), Amarelo (Intermediário), Vermelho (Crítico)
+        - Interpretação: Valores numéricos de proficiência por entidade
+        - Significado: Nível de conhecimento dos estudantes em cada entidade
+        
+        **FOQUE APENAS NESTE GRÁFICO DE PROFICIÊNCIA:**
+        - Analise exclusivamente os dados de proficiência média apresentados
+        - Não mencione outros gráficos (participação, habilidades, desempenho, etc.)
+        - Concentre-se apenas nos dados de proficiência e suas implicações pedagógicas
+        """,
+        
+        "Distribuição por Desempenho": """
+        **CONTEXTO TÉCNICO DO GRÁFICO DE DESEMPENHO:**
+        - Tipo: Gráfico de barras empilhadas (stacked bar chart)
+        - Eixo X: Entidades (Estado, CREDE, Município, Escola)
+        - Eixo Y: Percentual de alunos (0% a 100%)
+        - Barras: Divididas em 5 segmentos (Níveis 1-5)
+        - Padrões por etapa:
+          * 2º Ano: Não Alfabetizado → Alfabetização Incompleta → Intermediário → Suficiente → Desejável
+          * 5º/9º Ano: Muito Crítico → Crítico → Intermediário → Adequado
+        - Interpretação: Altura total = 100% dos alunos, segmentos = proporção por nível
+        
+        **FOQUE APENAS NESTE GRÁFICO DE DESEMPENHO:**
+        - Analise exclusivamente os dados de distribuição por desempenho apresentados
+        - Não mencione outros gráficos (participação, proficiência, habilidades, etc.)
+        - Concentre-se apenas nos dados de desempenho e estratégias por nível
+        """,
+        
+        "Taxa de Acerto por Habilidade": """
+        CONTEXTO TÉCNICO DO GRÁFICO:
+        - Tipo: Gráfico de barras agrupadas (grouped bar chart)
+        - Eixo X: Código da Habilidade (identificador único)
+        - Eixo Y: Taxa de acerto (0% a 100%)
+        - Barras: Agrupadas por tipo de entidade (Ceará, CREDE, Município, Escola)
+        - Interpretação: Altura da barra = taxa de acerto, cores = tipo de entidade
+        - Significado: Percentual de questões corretas por habilidade específica
+        - Hierarquia: Habilidades têm pré-requisitos - básicas são fundamentais para avançadas
+        """,
+        
+        "Proficiência por Etnia": """
+        CONTEXTO SOCIOLÓGICO E TÉCNICO DO GRÁFICO:
+        - Tipo: Gráfico de barras agrupadas (grouped bar chart)
+        - Eixo X: Grupos étnicos (Branca, Preta, Parda, Amarela, Indígena)
+        - Eixo Y: Proficiência média (escalas 500 ou 1000)
+        - Barras: Agrupadas por tipo de entidade
+        - Interpretação: Altura da barra = proficiência média do grupo étnico
+        - Significado: Nível de conhecimento por grupo étnico-racial
+        
+        PERSPECTIVA SOCIOLÓGICA - EQUIDADE EDUCACIONAL:
+        - FOCO PRINCIPAL: Identificar e analisar desigualdades educacionais entre grupos étnicos
+        - QUESTÃO CENTRAL: Como o sistema educacional reproduz ou combate desigualdades raciais?
+        - INDICADORES DE EQUIDADE: Proximidade dos resultados entre grupos étnicos
+        - ANÁLISE CRÍTICA: Fatores sociais, históricos e estruturais que influenciam o desempenho
+        - CONTEXTO HISTÓRICO: Herança de exclusão e discriminação racial no Brasil
+        - POLÍTICAS PÚBLICAS: Ações afirmativas e políticas de equidade racial
+        - INTERSECCIONALIDADE: Como raça se cruza com classe, gênero e território
+        """,
+        
+        "Proficiência por NSE": """
+        CONTEXTO SOCIOLÓGICO E TÉCNICO DO GRÁFICO:
+        - Tipo: Gráfico de barras agrupadas (grouped bar chart)
+        - Eixo X: Níveis Socioeconômicos (A, B, C, D, E)
+        - Eixo Y: Proficiência média (escalas 500 ou 1000)
+        - Barras: Agrupadas por tipo de entidade
+        - Interpretação: Altura da barra = proficiência média do NSE
+        - Significado: Nível de conhecimento por nível socioeconômico
+        
+        PERSPECTIVA SOCIOLÓGICA - EQUIDADE EDUCACIONAL:
+        - FOCO PRINCIPAL: Analisar como a origem socioeconômica impacta o desempenho educacional
+        - QUESTÃO CENTRAL: Como o sistema educacional reproduz ou combate desigualdades de classe?
+        - INDICADORES DE EQUIDADE: Redução das diferenças entre NSEs (A, B, C, D, E)
+        - ANÁLISE CRÍTICA: Fatores estruturais que perpetuam desigualdades socioeconômicas
+        - CONTEXTO HISTÓRICO: Herança de exclusão social e concentração de renda no Brasil
+        - CAPITAL CULTURAL: Como recursos familiares influenciam o desempenho escolar
+        - POLÍTICAS PÚBLICAS: Ações de democratização do acesso e qualidade educacional
+        - MOBILIDADE SOCIAL: Educação como instrumento de transformação social
+        """,
+        
+        "Proficiência por Sexo": """
+        CONTEXTO SOCIOLÓGICO E TÉCNICO DO GRÁFICO:
+        - Tipo: Gráfico de barras agrupadas (grouped bar chart)
+        - Eixo X: Gêneros (Feminino, Masculino)
+        - Eixo Y: Proficiência média (escalas 500 ou 1000)
+        - Barras: Agrupadas por tipo de entidade
+        - Interpretação: Altura da barra = proficiência média por gênero
+        - Significado: Nível de conhecimento por gênero
+        
+        PERSPECTIVA SOCIOLÓGICA - EQUIDADE EDUCACIONAL:
+        - FOCO PRINCIPAL: Analisar diferenças de desempenho entre gêneros na educação
+        - QUESTÃO CENTRAL: Como o sistema educacional reproduz ou combate desigualdades de gênero?
+        - INDICADORES DE EQUIDADE: Proximidade dos resultados entre gêneros
+        - ANÁLISE CRÍTICA: Fatores sociais e culturais que influenciam o desempenho por gênero
+        - CONTEXTO HISTÓRICO: Herança de desigualdades de gênero na sociedade brasileira
+        - ESTEREÓTIPOS: Como expectativas sociais afetam o desempenho educacional
+        - POLÍTICAS PÚBLICAS: Ações de promoção da equidade de gênero na educação
+        - INTERSECCIONALIDADE: Como gênero se cruza com raça, classe e território
+        - REPRESENTAÇÃO: Papel da representatividade e modelos de referência
+        """
+    }
+    
+    return contextos.get(nome_grafico, "")
+
+# ==================== FUNÇÃO DE ANÁLISE COM GROQ ====================
+
+def analisar_dataframe_com_groq(df, nome_grafico, contexto="", entidade_consultada="", df_concatenado=None):
+    """
+    Analisa um DataFrame usando a API da Groq e retorna insights considerando a hierarquia educacional
+    Usa df_concatenado para identificar corretamente a entidade e sua hierarquia
+    Inclui contexto do PDF de referência quando disponível
+    """
+    try:
+        # Verificar se a API key está configurada
+        if 'groq' not in st.secrets or 'api_key' not in st.secrets.groq:
+            return "⚠️ API key da Groq não configurada no secrets.toml"
+        
+        api_key = st.secrets.groq.api_key
+        if api_key == "gsk_your_groq_api_key_here":
+            return "⚠️ Configure sua API key da Groq no arquivo secrets.toml"
+        
+        # Importar groq apenas quando necessário
+        from groq import Groq
+        
+        # Inicializar cliente Groq
+        client = Groq(api_key=api_key)
+        
+        # Determinar tipo de entidade e hierarquia
+        tipo_entidade = "Desconhecida"
+        nivel_hierarquico = ""
+        entidades_superiores = []
+        nome_entidade_consultada = entidade_consultada  # Usar código como fallback
+        
+        # Usar df_concatenado se disponível, senão usar df
+        df_para_identificacao = df_concatenado if df_concatenado is not None and not df_concatenado.empty else df
+        
+        if not df_para_identificacao.empty:
+            # Tentar obter nome da entidade consultada da coluna CD_ENTIDADE
+            if 'CD_ENTIDADE' in df_para_identificacao.columns and not df_para_identificacao['CD_ENTIDADE'].isna().all():
+                # Converter entidade_consultada para string para comparação
+                entidade_consultada_str = str(entidade_consultada)
+                # Buscar a linha que corresponde à entidade consultada
+                entidade_filtrada = df_para_identificacao[df_para_identificacao['CD_ENTIDADE'].astype(str) == entidade_consultada_str]
+                if not entidade_filtrada.empty:
+                    # Tentar obter nome da entidade de diferentes colunas
+                    if 'NM_ENTIDADE' in df_para_identificacao.columns and not entidade_filtrada['NM_ENTIDADE'].isna().iloc[0]:
+                        nome_entidade_consultada = f"{entidade_consultada} - {entidade_filtrada['NM_ENTIDADE'].iloc[0]}"
+                    elif 'DC_TIPO_ENTIDADE' in df_para_identificacao.columns and not entidade_filtrada['DC_TIPO_ENTIDADE'].isna().iloc[0]:
+                        nome_entidade_consultada = f"{entidade_consultada} - {entidade_filtrada['DC_TIPO_ENTIDADE'].iloc[0]}"
+            
+            # Verificar colunas de tipo de entidade - usar DC_TIPO_ENTIDADE para identificar o tipo
+            if 'DC_TIPO_ENTIDADE' in df_para_identificacao.columns and 'CD_ENTIDADE' in df_para_identificacao.columns:
+                # Converter entidade_consultada para string para comparação
+                entidade_consultada_str = str(entidade_consultada)
+                # Buscar o tipo de entidade específico da entidade consultada
+                entidade_filtrada = df_para_identificacao[df_para_identificacao['CD_ENTIDADE'].astype(str) == entidade_consultada_str]
+                if not entidade_filtrada.empty:
+                    dc_tipo_entidade = str(entidade_filtrada['DC_TIPO_ENTIDADE'].iloc[0]).upper()
+                    # Mapear DC_TIPO_ENTIDADE para tipos de entidade baseado na descrição
+                    if 'ESTADO' in dc_tipo_entidade or 'CEARÁ' in dc_tipo_entidade:
+                        tipo_entidade = "Estado"
+                        nivel_hierarquico = "Nível Estadual"
+                    elif 'CREDE' in dc_tipo_entidade or 'REGIONAL' in dc_tipo_entidade:
+                        tipo_entidade = "CREDE/Regional"
+                        nivel_hierarquico = "Nível Regional"
+                        entidades_superiores = ["Estado"]
+                    elif 'MUNICÍPIO' in dc_tipo_entidade or 'MUNICIPIO' in dc_tipo_entidade:
+                        tipo_entidade = "Município"
+                        nivel_hierarquico = "Nível Municipal"
+                        entidades_superiores = ["Estado", "CREDE/Regional"]
+                    elif 'ESCOLA' in dc_tipo_entidade or 'EEIEF' in dc_tipo_entidade or 'EEM' in dc_tipo_entidade:
+                        tipo_entidade = "Escola"
+                        nivel_hierarquico = "Nível Escolar"
+                        entidades_superiores = ["Estado", "CREDE/Regional", "Município"]
+                    else:
+                        # Fallback para TP_ENTIDADE se DC_TIPO_ENTIDADE não for reconhecido
+                        if 'TP_ENTIDADE' in df.columns:
+                            tp_entidade = entidade_filtrada['TP_ENTIDADE'].iloc[0]
+                            if tp_entidade == 1:
+                                tipo_entidade = "Estado"
+                                nivel_hierarquico = "Nível Estadual"
+                            elif tp_entidade == 2:
+                                tipo_entidade = "CREDE/Regional"
+                                nivel_hierarquico = "Nível Regional"
+                                entidades_superiores = ["Estado"]
+                            elif tp_entidade == 3:
+                                tipo_entidade = "Município"
+                                nivel_hierarquico = "Nível Municipal"
+                                entidades_superiores = ["Estado", "CREDE/Regional"]
+                            elif tp_entidade == 4:
+                                tipo_entidade = "Escola"
+                                nivel_hierarquico = "Nível Escolar"
+                                entidades_superiores = ["Estado", "CREDE/Regional", "Município"]
+            
+            # Verificar se há dados de entidades superiores na hierarquia - usar dados da entidade consultada
+            if 'CD_ENTIDADE' in df_para_identificacao.columns:
+                # Converter entidade_consultada para string para comparação
+                entidade_consultada_str = str(entidade_consultada)
+                entidade_filtrada = df_para_identificacao[df_para_identificacao['CD_ENTIDADE'].astype(str) == entidade_consultada_str]
+                if not entidade_filtrada.empty:
+                    if 'NM_ESTADO' in df_para_identificacao.columns and not entidade_filtrada['NM_ESTADO'].isna().iloc[0]:
+                        entidades_superiores.append(f"Estado: {entidade_filtrada['NM_ESTADO'].iloc[0]}")
+                    if 'NM_REGIONAL' in df_para_identificacao.columns and not entidade_filtrada['NM_REGIONAL'].isna().iloc[0]:
+                        entidades_superiores.append(f"CREDE: {entidade_filtrada['NM_REGIONAL'].iloc[0]}")
+                    if 'NM_MUNICIPIO' in df_para_identificacao.columns and not entidade_filtrada['NM_MUNICIPIO'].isna().iloc[0]:
+                        entidades_superiores.append(f"Município: {entidade_filtrada['NM_MUNICIPIO'].iloc[0]}")
+        
+        # Preparar dados para análise - limpeza inteligente de valores faltantes
+        # Valores faltantes indicam que a coluna não tem registro para aquela linha específica
+        # Para análise, manter linhas que tenham pelo menos alguns dados válidos
+        df_limpo = df.copy()
+        
+        # Se o DataFrame está completamente vazio após dropna(), usar estratégia alternativa
+        if df.dropna().empty and not df.empty:
+            # Manter linhas que tenham pelo menos 50% das colunas com dados válidos
+            threshold = len(df.columns) * 0.5
+            df_limpo = df.dropna(thresh=threshold)
+            
+            # Se ainda estiver vazio, manter linhas com pelo menos 25% das colunas
+            if df_limpo.empty:
+                threshold = len(df.columns) * 0.25
+                df_limpo = df.dropna(thresh=threshold)
+                
+            # Se ainda estiver vazio, usar o DataFrame original
+            if df_limpo.empty:
+                df_limpo = df
+        else:
+            df_limpo = df.dropna()
+        
+        df_info = {
+            "nome_grafico": nome_grafico,
+            "contexto": contexto,
+            "entidade_consultada": nome_entidade_consultada,
+            "tipo_entidade": tipo_entidade,
+            "nivel_hierarquico": nivel_hierarquico,
+            "entidades_superiores": entidades_superiores,
+            "shape_original": df.shape,
+            "shape_limpo": df_limpo.shape,
+            "colunas": df.columns.tolist(),
+            "tipos_dados": df.dtypes.to_dict(),
+            "amostra_dados": df_limpo.head(10).to_dict('records') if not df_limpo.empty else [],
+            "estatisticas": df_limpo.describe().to_dict() if not df_limpo.empty else {},
+            "debug_info": {
+                "entidade_consultada_original": entidade_consultada,
+                "entidade_consultada_str": str(entidade_consultada),
+                "cd_entidade_values": df_para_identificacao['CD_ENTIDADE'].unique().tolist()[:5] if 'CD_ENTIDADE' in df_para_identificacao.columns else "Coluna não encontrada",
+                "dc_tipo_entidade_values": df_para_identificacao['DC_TIPO_ENTIDADE'].unique().tolist()[:5] if 'DC_TIPO_ENTIDADE' in df_para_identificacao.columns else "Coluna não encontrada",
+                "nm_entidade_values": df_para_identificacao['NM_ENTIDADE'].unique().tolist()[:5] if 'NM_ENTIDADE' in df_para_identificacao.columns else "Coluna não encontrada",
+                "entidade_encontrada": not df_para_identificacao.empty and 'CD_ENTIDADE' in df_para_identificacao.columns and str(entidade_consultada) in df_para_identificacao['CD_ENTIDADE'].astype(str).values,
+                "dc_tipo_entidade_da_entidade": entidade_filtrada['DC_TIPO_ENTIDADE'].iloc[0] if not df_para_identificacao.empty and 'CD_ENTIDADE' in df_para_identificacao.columns and 'DC_TIPO_ENTIDADE' in df_para_identificacao.columns and not df_para_identificacao[df_para_identificacao['CD_ENTIDADE'].astype(str) == str(entidade_consultada)].empty else "Não encontrado",
+                "nm_entidade_da_entidade": entidade_filtrada['NM_ENTIDADE'].iloc[0] if not df_para_identificacao.empty and 'CD_ENTIDADE' in df_para_identificacao.columns and 'NM_ENTIDADE' in df_para_identificacao.columns and not df_para_identificacao[df_para_identificacao['CD_ENTIDADE'].astype(str) == str(entidade_consultada)].empty else "Não encontrado"
+            }
+        }
+        
+        # Criar prompt para análise
+        # Adicionar contexto dos documentos usando RAG se disponível
+        contexto_documentos = ""
+        if st.session_state.get('documentos_carregados', False) and st.session_state.get('dados_rag'):
+            dados_rag = st.session_state['dados_rag']
+            
+            # Usar RAG para encontrar informações relevantes
+            consulta_especifica = f"{nome_grafico} {contexto} {tipo_entidade}"
+            informacoes_relevantes = buscar_informacoes_relevantes(consulta_especifica, dados_rag, top_k=3)
+            
+            # Adicionar informações das tabelas se disponíveis
+            tabelas_contexto = ""
+            if dados_rag.get('tabelas'):
+                tabelas_contexto = "\n\nDADOS DAS TABELAS DO DCRC:\n"
+                for i, tabela in enumerate(dados_rag['tabelas'][:2], 1):
+                    if isinstance(tabela, dict) and 'conteudo' in tabela:
+                        tabelas_contexto += f"Tabela {i}:\n{tabela['conteudo'][:500]}...\n\n"
+                    else:
+                        # Fallback para outras estruturas de tabela
+                        conteudo_fallback = str(tabela)[:500] if tabela else "Sem conteúdo"
+                        tabelas_contexto += f"Tabela {i}:\n{conteudo_fallback}...\n\n"
+            
+            # Adicionar seções importantes
+            secoes_contexto = ""
+            if dados_rag.get('secoes_importantes'):
+                secoes_contexto = "\n\nSEÇÕES IMPORTANTES DO DCRC:\n"
+                for secao, conteudos in dados_rag['secoes_importantes'].items():
+                    if conteudos:
+                        secoes_contexto += f"{secao.upper()}:\n{conteudos[0][:300]}...\n\n"
+            
+            # Contexto específico para habilidades
+            contexto_habilidades = ""
+            if 'habilidade' in nome_grafico.lower() or 'competência' in nome_grafico.lower():
+                # Adicionar comparação específica com competências do BNCC/DCRC
+                comparacao_competencias = comparar_habilidades_competencias(dados_rag, nome_grafico)
+                
+                # Adicionar análise de percursos de aprendizado
+                analise_percursos = analisar_percursos_aprendizado(dados_rag, nome_grafico)
+                
+                # Adicionar ações específicas para escola
+                acoes_escola = gerar_acoes_escola_baseadas_pdfs(dados_rag, nome_grafico, contexto)
+                
+                contexto_habilidades = f"""
+
+        ===== ANÁLISE HIERÁRQUICA DE HABILIDADES: RELAÇÕES, DEPENDÊNCIAS E PERCURSOS POR NÍVEL EDUCACIONAL =====
+        
+        **ANÁLISE HIERÁRQUICA OBRIGATÓRIA - PERSPECTIVA POR NÍVEL EDUCACIONAL:**
+        
+        1. MAPEAMENTO HIERÁRQUICO DE RELAÇÕES E DEPENDÊNCIAS:
+           - IDENTIFIQUE EXATAMENTE quais habilidades aparecem próximas nos dados ESPECÍFICOS do DataFrame
+           - ANALISE se habilidades com desempenho similar estão relacionadas de forma CONCRETA conforme BNCC/DCRC
+           - MAPEIE dependências ESPECÍFICAS: quais habilidades são pré-requisito para outras conforme os documentos
+           - IDENTIFIQUE habilidades "gargalo" ESPECÍFICAS que bloqueiam o desenvolvimento de outras
+           - EXPLIQUE por que certas habilidades têm padrões similares de forma ESPECÍFICA baseado nas relações dos documentos
+           - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        2. PERCURSOS HIERÁRQUICOS DE APRENDIZADO ESTRUTURADOS:
+           - DESENHE percursos de aprendizado ESPECÍFICOS: quais habilidades devem ser desenvolvidas primeiro
+           - MAPEIE a hierarquia ESPECÍFICA: habilidades básicas → intermediárias → avançadas conforme BNCC/DCRC
+           - IDENTIFIQUE pontos de convergência CONCRETOS onde múltiplas habilidades se encontram
+           - ANALISE transferências de conhecimento ESPECÍFICAS entre componentes usando as relações dos documentos
+           - SUGIRA sequências de ensino ESPECÍFICAS baseadas nas relações internas identificadas nos documentos
+           - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        3. RELAÇÃO HIERÁRQUICA ENTRE COMPONENTES E COMPETÊNCIAS:
+           - MAPEIE como habilidades de diferentes componentes se conectam de forma CONCRETA conforme BNCC/DCRC
+           - IDENTIFIQUE competências ESPECÍFICAS que dependem de múltiplos componentes baseado nas competências específicas
+           - RELACIONE cada habilidade com competências específicas do BNCC/DCRC de forma CONCRETA
+           - ANALISE lacunas ESPECÍFICAS entre habilidades e competências esperadas conforme os documentos
+           - SUGIRA abordagens interdisciplinares ESPECÍFICAS baseadas nas relações identificadas nos documentos
+           - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        4. DESCRIÇÕES E METODOLOGIAS HIERÁRQUICAS:
+           - USE as descrições ESPECÍFICAS do BNCC/DCRC para entender o que cada habilidade envolve
+           - COMPARE descrições com desempenho real nos dados ESPECÍFICOS do DataFrame
+           - IDENTIFIQUE habilidades mal compreendidas pelos estudantes de forma CONCRETA baseado nas descrições
+           - MAPEIE metodologias ESPECÍFICAS sugeridas nos documentos para cada habilidade
+           - SUGIRA reformulações pedagógicas ESPECÍFICAS baseadas nas descrições dos documentos
+           - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        5. INTERVENÇÕES HIERÁRQUICAS SISTÊMICAS E MONITORAMENTO:
+           - DESENHE planos de ação ESPECÍFICOS baseados nos percursos de aprendizado identificados
+           - IDENTIFIQUE pontos de intervenção mais eficazes de forma CONCRETA baseado nas dependências
+           - MAPEIE como melhorar uma habilidade impacta outras habilidades de forma ESPECÍFICA
+           - SUGIRA intervenções sistêmicas ESPECÍFICAS baseadas nas relações identificadas nos documentos
+           - MONITORE progresso considerando as interconexões de forma CONCRETA conforme BNCC/DCRC
+           - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        6. REFERENCIAMENTO HIERÁRQUICO OBRIGATÓRIO:
+           - REFERENCIE SEMPRE: "Conforme a BNCC", "Segundo o DCRC", "Baseado nas relações identificadas"
+           - CITE competências específicas e objetivos de aprendizagem mencionados nos documentos de forma CONCRETA
+           - REFERENCIE metodologias e recursos sugeridos nos documentos de forma ESPECÍFICA
+           - IDENTIFIQUE campos de experiência e práticas de linguagem dos documentos de forma CONCRETA
+           - DIFERENCIE entre informações dos documentos vs. análises genéricas de forma CLARA
+           - SEJA ESPECÍFICO: evite generalizações, foque nos dados específicos da entidade
+           - **CITE OBRIGATORIAMENTE BNCC E DCRC**: Sempre que possível, referencie tanto a BNCC quanto o DCRC como fontes principais das metodologias, competências e diretrizes curriculares
+           - **PERSPECTIVA HIERÁRQUICA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        {comparacao_competencias}
+        
+        {analise_percursos}
+        
+        {acoes_escola}
+        """
+            
+            # Contexto específico para proficiência
+            contexto_proficiencia = ""
+            if 'proficiência' in nome_grafico.lower() or 'desempenho' in nome_grafico.lower():
+                # Adicionar ações específicas para escola
+                acoes_escola_prof = gerar_acoes_escola_baseadas_pdfs(dados_rag, nome_grafico, contexto)
+                
+                contexto_proficiencia = f"""
+
+        ===== CONTEXTO ESPECÍFICO PARA ANÁLISE DE PROFICIÊNCIA (DCRC + BNCC) =====
+        
+        FOQUE ESPECIALMENTE EM:
+        1. RELAÇÃO COM COMPETÊNCIAS GERAIS DA BNCC
+        2. ALINHAMENTO COM OBJETIVOS DE APRENDIZAGEM
+        3. PROGRESSÃO CURRICULAR POR ETAPAS
+        4. CAMPOS DE EXPERIÊNCIA E ÁREAS DE CONHECIMENTO
+        5. EXPECTATIVAS DE APRENDIZAGEM POR ANO/SÉRIE
+        
+        USE AS INFORMAÇÕES DO DCRC E BNCC PARA:
+        - Contextualizar níveis de proficiência com expectativas curriculares
+        - Identificar lacunas entre desempenho e objetivos da BNCC
+        - Sugerir intervenções alinhadas com competências específicas
+        - Relacionar proficiência com campos de experiência
+        - Considerar princípios e fundamentos da BNCC
+        
+        {acoes_escola_prof}
+        """
+            
+            # Adicionar análise personalizada baseada nos dados específicos
+            analise_personalizada = gerar_analise_personalizada(dados_rag, df_info, nome_grafico, contexto)
+            
+            # Adicionar ações específicas para escola baseadas no tipo de gráfico
+            acoes_escola_geral = gerar_acoes_escola_baseadas_pdfs(dados_rag, nome_grafico, contexto)
+            
+            if informacoes_relevantes:
+                contexto_rag = "\n\n".join([info['texto'] for info in informacoes_relevantes])
+                contexto_documentos = f"""
+
+        ===== CONTEXTO DOS DOCUMENTOS DCRC + BNCC (INFORMAÇÕES RELEVANTES) =====
+        
+        INFORMAÇÕES ESPECÍFICAS ENCONTRADAS:
+        {contexto_rag[:2000]}
+        
+        {tabelas_contexto}
+        
+        {secoes_contexto}
+        
+        {contexto_habilidades}
+        
+        {contexto_proficiencia}
+        
+        {analise_personalizada}
+        
+        {acoes_escola_geral}
+        
+        INSTRUÇÃO CRÍTICA - ANÁLISE CIRÚRGICA FUNDAMENTADA NOS DOCUMENTOS BNCC E DCRC:
+        
+        **ANÁLISE HIERÁRQUICA OBRIGATÓRIA - PERSPECTIVA POR NÍVEL EDUCACIONAL:**
+        
+        **OBRIGATÓRIO**: Sua análise deve ser fundamentada EXCLUSIVAMENTE nas informações dos documentos BNCC e DCRC apresentados acima. Evite análises genéricas ou baseadas em conhecimento geral. **ANALISE PELA HIERARQUIA EDUCACIONAL**: cada entidade deve se ver no contexto dos níveis superiores (escola dentro do município, município dentro da regional, etc.).
+        
+        **REFERENCIAMENTO HIERÁRQUICO OBRIGATÓRIO**:
+        1. **CITE EXPLICITAMENTE** quando usar informações do BNCC ("conforme a BNCC", "segundo a Base Nacional Comum Curricular")
+        2. **REFERENCIE DIRETAMENTE** quando usar informações do DCRC ("conforme o DCRC", "segundo o Documento Curricular Referencial do Ceará")
+        3. **IDENTIFIQUE A FONTE** de cada recomendação (BNCC ou DCRC) de forma CONCRETA
+        4. **SEJA ESPECÍFICO**: evite generalizações, foque nos dados específicos da entidade
+        5. **CITE OBRIGATORIAMENTE BNCC E DCRC**: Sempre que possível, referencie tanto a BNCC quanto o DCRC como fontes principais das metodologias, competências e diretrizes curriculares
+        6. **ANALISE PELA HIERARQUIA**: Considere como a entidade se posiciona em relação aos níveis superiores e inferiores
+        
+        **FUNDAMENTAÇÃO CURRICULAR HIERÁRQUICA**:
+        7. **COMPETÊNCIAS GERAIS**: Relacione com as 10 competências gerais da BNCC de forma CONCRETA
+        8. **COMPETÊNCIAS ESPECÍFICAS**: Cite competências específicas das áreas de conhecimento de forma ESPECÍFICA
+        9. **HABILIDADES**: Referencie habilidades específicas mencionadas nos documentos de forma CONCRETA
+        10. **OBJETIVOS DE APRENDIZAGEM**: Use expectativas de aprendizagem dos documentos de forma ESPECÍFICA
+        11. **CAMPOS DE EXPERIÊNCIA**: Relacione com campos de experiência da BNCC de forma CONCRETA
+        12. **ÁREAS DE CONHECIMENTO**: Contextualize com áreas de conhecimento específicas de forma ESPECÍFICA
+        13. **PRÁTICAS DE LINGUAGEM**: Aplique práticas de linguagem quando relevante de forma CONCRETA
+        
+        **ANÁLISE PEDAGÓGICA HIERÁRQUICA**:
+        14. **METODOLOGIAS**: Use metodologias ESPECÍFICAS sugeridas no DCRC para intervenções
+        15. **RECURSOS**: Sugira recursos ESPECÍFICOS baseados nas orientações dos documentos
+        16. **AVALIAÇÃO**: Aplique princípios de avaliação ESPECÍFICOS mencionados nos documentos
+        17. **PROGRESSÃO**: Considere progressão curricular ESPECÍFICA definida nos documentos
+        18. **INTERVENÇÕES**: Baseie intervenções nas diretrizes curriculares de forma CONCRETA
+        
+        **ESTRUTURA DE RESPOSTA HIERÁRQUICA OBRIGATÓRIA**:
+        - **Fundamentação Documental**: Cite trechos ESPECÍFICOS dos documentos
+        - **Análise Curricular**: Relacione dados ESPECÍFICOS com competências e habilidades
+        - **Recomendações Baseadas em Evidências**: Use metodologias ESPECÍFICAS dos documentos
+        - **Ações Pedagógicas**: Específicas baseadas nas diretrizes curriculares de forma CONCRETA
+        - **Indicadores de Progressão**: Alinhados com expectativas de aprendizagem ESPECÍFICAS
+        - **PERSPECTIVA HIERÁRQUICA**: Analise como a entidade se posiciona em relação aos níveis superiores e inferiores
+        """
+            else:
+                # Fallback para contexto geral se RAG não encontrar informações específicas
+                contexto_documentos = f"""
+
+        ===== CONTEXTO DOS DOCUMENTOS DCRC + BNCC (GERAL) =====
+        
+        {st.session_state['documentos_referencia'][:3000]}
+        
+        {tabelas_contexto}
+        
+        {secoes_contexto}
+        
+        {contexto_habilidades}
+        
+        {contexto_proficiencia}
+        
+        {analise_personalizada}
+        
+        {acoes_escola_geral}
+        
+        INSTRUÇÃO CRÍTICA: Use OBRIGATORIAMENTE estas informações do DCRC e BNCC para contextualizar suas análises e descrever ações específicas para a escola. PERSONALIZE baseando-se nos dados específicos da entidade. REFERENCIE explicitamente os PDFs nas análises.
+        """
+
+        prompt = f"""
+        **ANÁLISE HIERÁRQUICA** dos dados educacionais do SPAECE (Sistema Permanente de Avaliação da Educação Básica do Ceará) considerando a HIERARQUIA EDUCACIONAL.
+
+        **CONTEXTO HIERÁRQUICO ESPECÍFICO:**
+        - Entidade Consultada: {entidade_consultada}
+        - Tipo de Entidade: {tipo_entidade}
+        - Nível Hierárquico: {nivel_hierarquico}
+        - Entidades Superiores: {', '.join(entidades_superiores) if entidades_superiores else 'Nenhuma'}
+
+        **INFORMAÇÕES ESPECÍFICAS DO GRÁFICO:**
+        - Nome: {nome_grafico}
+        - Contexto: {contexto}
+        - Dimensões Originais: {df_info['shape_original'][0]} linhas x {df_info['shape_original'][1]} colunas
+        - Dimensões Após Limpeza: {df_info['shape_limpo'][0]} linhas x {df_info['shape_limpo'][1]} colunas
+        - Colunas: {', '.join(df_info['colunas'])}
+
+        **INSTRUÇÃO HIERÁRQUICA OBRIGATÓRIA:**
+        ANALISE PELA HIERARQUIA EDUCACIONAL: cada entidade deve se ver no contexto dos níveis superiores (escola dentro do município, município dentro da regional, etc.). Use informações dos documentos BNCC/DCRC de forma CONCRETA e ESPECÍFICA. **CITE OBRIGATORIAMENTE BNCC E DCRC** como fontes principais das metodologias, competências e diretrizes curriculares.
+        
+        **IMPORTANTE - FORMATAÇÃO DE NÚMEROS:**
+        - **Números de alunos:** SEMPRE arredonde para números inteiros (ex: 150 alunos, não 150,5 alunos)
+        - **Percentuais:** Use 1 casa decimal (ex: 85,3%)
+        - **Proficiência:** Use números inteiros (ex: 250 pontos, não 250,7 pontos)
+        - **Evite:** "meio aluno", "0,5 alunos" ou qualquer número decimal para quantidade de pessoas
+        
+        **FOCO EXCLUSIVO NO GRÁFICO ATUAL:**
+        - **ANALISE APENAS** o gráfico "{nome_grafico}" apresentado acima
+        - **NÃO MENCIONE** outros gráficos ou análises (participação, proficiência, habilidades, etc.)
+        - **FOQUE EXCLUSIVAMENTE** nos dados específicos deste gráfico
+        - **NÃO FAÇA** comparações com outros tipos de gráficos
+        - **MANTENHA** o foco apenas nos dados e contexto deste gráfico específico
+        
+        **COMPARAÇÃO HIERÁRQUICA ESPECÍFICA:**
+        - **COMPARE APENAS** entre os níveis: Estado, Regional (CREDE), Municipal e Escolar
+        - **NÃO MENCIONE** comparações nacionais ou benchmarks nacionais
+        - **FOQUE** na comparação entre os níveis hierárquicos do Ceará
+        - **EVITE** palavras como "benchmarks" ou "padrões nacionais"
+        - **CONCENTRE-SE** na análise comparativa entre os níveis do estado do Ceará
+
+        {obter_contexto_banner(nome_grafico)}
+
+        {obter_contexto_seduc_spaece()}
+
+        **OBSERVAÇÃO IMPORTANTE:** Valores faltantes (NaN) foram tratados inteligentemente na análise. Quando possível, foram removidos completamente. Quando isso resultaria em dados insuficientes, foram mantidas linhas com pelo menos 50% ou 25% das colunas válidas, pois valores faltantes indicam que aquela coluna não possui registro para aquela linha específica na estrutura do DataFrame.
+
+        DADOS DE AMOSTRA (após limpeza):
+        {json.dumps(df_info['amostra_dados'], indent=2, default=str)}
+
+        ESTATÍSTICAS DESCRITIVAS (após limpeza):
+        {json.dumps(df_info['estatisticas'], indent=2, default=str)}
+
+        INFORMAÇÕES DE DEBUG:
+        {json.dumps(df_info['debug_info'], indent=2, default=str)}
+        {contexto_documentos}
+
+        INSTRUÇÕES ESPECÍFICAS PARA ANÁLISE PROFUNDA E DETALHADA:
+        
+        **ANÁLISE ESTATÍSTICA AVANÇADA:**
+        1. CALCULE métricas estatísticas completas (média, mediana, moda, desvio padrão, variância, coeficiente de variação, assimetria, curtose)
+        2. REALIZE análise de distribuição (normalidade, outliers, percentis 25, 50, 75, 90, 95)
+        3. CALCULE intervalos de confiança e margens de erro quando aplicável
+        4. IDENTIFIQUE correlações significativas entre variáveis e calcule coeficientes de correlação
+        5. ANALISE variabilidade intra e inter-grupos com medidas de dispersão
+        6. CALCULE índices de desigualdade (Gini, Theil, etc.) quando relevante
+        
+        **ANÁLISE COMPARATIVA DETALHADA:**
+        7. COMPARE entre os níveis hierárquicos: Estado, Regional (CREDE), Municipal e Escolar
+        8. ANALISE evolução temporal (se disponível) com tendências e sazonalidades
+        9. IDENTIFIQUE posicionamento relativo entre entidades com rankings e percentis
+        10. CALCULE gaps de desempenho específicos e oportunidades de melhoria quantificadas
+        11. COMPARE contra metas educacionais estabelecidas e padrões de referência do Ceará
+        
+        **ANÁLISE DE SEGMENTAÇÃO E DISPERSÃO:**
+        12. IDENTIFIQUE subgrupos com desempenho diferenciado e analise suas características
+        13. ANALISE variabilidade intra e inter-grupos com medidas estatísticas precisas
+        14. CALCULE índices de desigualdade e concentração quando aplicável
+        15. IDENTIFIQUE fatores explicativos para as diferenças observadas
+        16. MAPEIE distribuição espacial e temporal dos resultados
+        
+        **ANÁLISE DE CORRELAÇÕES E RELAÇÕES CAUSAIS:**
+        17. IDENTIFIQUE correlações significativas entre variáveis com coeficientes precisos
+        18. ANALISE relações de causa e efeito com evidências estatísticas
+        19. IDENTIFIQUE fatores de influência, mediadores e moderadores
+        20. SUGIRA hipóteses explicativas para os padrões observados com fundamentação
+        21. ANALISE cadeias causais e efeitos indiretos
+        
+        **ANÁLISE DE EQUIDADE E JUSTIÇA EDUCACIONAL:**
+        22. AVALIE distribuição justa de oportunidades e resultados com métricas específicas
+        23. IDENTIFIQUE grupos em desvantagem educacional com evidências quantitativas
+        24. ANALISE fatores de exclusão e discriminação com dados concretos
+        25. SUGIRA políticas de equidade e inclusão baseadas em evidências
+        26. CALCULE índices de equidade e justiça educacional
+        
+        **ANÁLISE SOCIOLÓGICA CRÍTICA (para ETNIA, NSE, SEXO):**
+        27. PERSPECTIVA SOCIOLÓGICA: Analise através de lente crítica da sociologia da educação
+        28. FOCO EM EQUIDADE: Identifique e analise desigualdades educacionais entre grupos
+        29. CONTEXTO HISTÓRICO: Considere heranças de exclusão e discriminação no Brasil
+        30. FATORES ESTRUTURAIS: Analise como sistemas sociais perpetuam desigualdades
+        31. INTERSECCIONALIDADE: Como raça, classe e gênero se cruzam nas desigualdades
+        32. POLÍTICAS PÚBLICAS: Sugira ações afirmativas e políticas de equidade
+        33. MOBILIDADE SOCIAL: Como a educação pode transformar realidades sociais
+        34. CAPITAL CULTURAL: Como recursos familiares influenciam o desempenho
+        35. ESTEREÓTIPOS: Como expectativas sociais afetam diferentes grupos
+        36. REPRESENTAÇÃO: Papel da representatividade e modelos de referência
+        
+        **ANÁLISE DE HABILIDADES E COMPETÊNCIAS:**
+        37. MAPEIE hierarquia de habilidades e pré-requisitos com base no DCRC
+        38. IDENTIFIQUE gaps de aprendizagem específicos e quantificados
+        39. ANALISE sequência pedagógica ideal baseada em competências
+        40. SUGIRA intervenções diferenciadas por habilidade com estratégias específicas
+        41. RELACIONE habilidades com competências específicas do DCRC
+        42. ANALISE interdependências entre habilidades e competências
+        
+        **ANÁLISE DE PROFICIÊNCIA E DESEMPENHO:**
+        43. USE escalas de referência adequadas (500/1000) com interpretação precisa
+        44. ANALISE distribuição por níveis de desempenho com percentuais específicos
+        45. IDENTIFIQUE fatores que explicam a proficiência com evidências
+        46. SUGIRA estratégias de melhoria por nível com ações específicas
+        47. RELACIONE com competências gerais da BNCC
+        48. ANALISE alinhamento com objetivos de aprendizagem
+        
+        **ANÁLISE CONTEXTUAL E SISTÊMICA:**
+        49. CONSIDERE fatores socioeconômicos, geográficos e institucionais
+        50. ANALISE impacto de políticas públicas e programas específicos
+        51. IDENTIFIQUE recursos e condições necessárias para melhoria
+        52. SUGIRA mudanças sistêmicas necessárias com fundamentação
+        
+        **RECOMENDAÇÕES ESTRATÉGICAS PRIORITÁRIAS:**
+        53. PRIORIZE ações por impacto e viabilidade com matriz de priorização
+        54. DEFINA metas específicas e mensuráveis com indicadores claros
+        55. SUGIRA cronograma de implementação com marcos temporais
+        56. IDENTIFIQUE recursos necessários com estimativas quantificadas
+        57. FOQUE na entidade específica consultada ({nome_entidade_consultada})
+        58. ADAPTE conselhos ao tipo de gestor (Secretário Estadual, Coordenador Regional, Secretário Municipal, Diretor Escolar)
+        
+        **INDICADORES DE MONITORAMENTO E AVALIAÇÃO:**
+        59. DEFINA métricas de processo e resultado específicas
+        60. ESTABELEÇA metas intermediárias e finais quantificadas
+        61. SUGIRA frequência de monitoramento com cronograma
+        62. IDENTIFIQUE sinais de alerta e sucesso com thresholds específicos
+        
+        **ESTRUTURA DA RESPOSTA DETALHADA:**
+        63. RESUMO EXECUTIVO (4-5 parágrafos com insights principais e números específicos)
+        64. ANÁLISE ESTATÍSTICA AVANÇADA (métricas detalhadas com cálculos)
+        65. ANÁLISE COMPARATIVA E BENCHMARKING (posicionamento relativo quantificado)
+        66. ANÁLISE DE SEGMENTAÇÃO E DISPERSÃO (subgrupos e variabilidade específica)
+        67. ANÁLISE DE CORRELAÇÕES E RELAÇÕES CAUSAIS (fatores explicativos com evidências)
+        68. ANÁLISE DE EQUIDADE E JUSTIÇA EDUCACIONAL (desigualdades e inclusão quantificadas)
+        69. ANÁLISE DE HABILIDADES/COMPETÊNCIAS (se aplicável, com mapeamento detalhado)
+        70. ANÁLISE DE PROFICIÊNCIA E DESEMPENHO (se aplicável, com escalas precisas)
+        71. ANÁLISE CONTEXTUAL E SISTÊMICA (fatores externos com impacto quantificado)
+        72. RECOMENDAÇÕES ESTRATÉGICAS PRIORITÁRIAS (ações específicas com cronograma)
+        73. INDICADORES DE MONITORAMENTO E AVALIAÇÃO (métricas de sucesso específicas)
+        74. CONCLUSÕES E PRÓXIMOS PASSOS (síntese e direcionamento claro)
+        
+        **FUNDAMENTAÇÃO SEDUC-CE E SPAECE:**
+        75. USE OBRIGATORIAMENTE o contexto da SEDUC-CE e SPAECE fornecido acima
+        76. COMPARE resultados com indicadores de referência do Ceará (IDEB, proficiência média, taxas)
+        77. CONTEXTUALIZE análises com políticas educacionais do estado (PAIC, Mais Paic, Aprender Pra Valer)
+        78. REFERENCIE padrões de desempenho específicos do SPAECE (escalas 500/1000, níveis)
+        79. RELACIONE com fatores de sucesso educacional do Ceará identificados
+        80. CONSIDERE características socioeconômicas específicas do estado
+        81. IDENTIFIQUE alinhamento com metas e padrões de referência estaduais
+        82. SUGIRA ações baseadas em programas e iniciativas já implementadas no Ceará
+        83. CONTEXTUALIZE desafios atuais do sistema educacional cearense
+        84. REFERENCIE fontes oficiais (sites SEDUC-CE e SPAECE) quando apropriado
+        
+        **REQUISITOS DE QUALIDADE:**
+        85. SEJA EXTREMAMENTE específico e detalhado com números concretos
+        86. USE dados concretos e cálculos precisos com fórmulas quando aplicável
+        87. FORNEÇA insights acionáveis e estratégicos com fundamentação
+        88. MANTENHA foco na melhoria educacional e equidade com evidências
+        89. EVITE análises superficiais - seja profundo e analítico
+        90. USE linguagem técnica apropriada mas acessível
+        91. FORNEÇA evidências para todas as afirmações com dados específicos
+        92. REFERENCIE explicitamente os PDFs quando aplicável
+        93. FOQUE na entidade específica consultada, não em todas as entidades
+        94. ADAPTE conselhos ao tipo de gestor e sua esfera de influência
+        95. FUNDAMENTE análises com contexto específico do Ceará e SPAECE
+
+        Responda em português brasileiro.
+        """
+        
+        # Fazer chamada para a API
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": f"Você é um consultor educacional especializado em análise de dados do SPAECE com mais de 15 anos de experiência. Seu papel é aconselhar especificamente o gestor da entidade consultada ({nome_entidade_consultada}) sobre ações práticas e viáveis dentro de sua esfera de influência. Considere que este gestor tem poder apenas sobre seu nível hierárquico ({nivel_hierarquico}) e não pode influenciar outros níveis da hierarquia educacional. Forneça análises PROFUNDAS, DETALHADAS e ESTRATÉGICAS com evidências quantitativas e qualitativas."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=3000,
+            temperature=0.2
+        )
+        
+        return response.choices[0].message.content
+        
+    except ImportError:
+        return "⚠️ Biblioteca groq não instalada. Execute: pip install groq"
+    except Exception as e:
+        return f"❌ Erro na análise: {str(e)}"
 
 # Sistema de Autenticação - Carregar do secrets.toml
 try:
@@ -147,7 +1805,7 @@ except Exception as e:
 
 # Configuração da página
 st.set_page_config(
-    page_title="Resultados SPAECE 2024 - CREDE 1", 
+    page_title="Consulta API SPAECE", 
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -184,7 +1842,7 @@ st.markdown("""
     }
     
     div[data-testid="stMetric"]:hover {
-        border-color: #2ca02c;
+        border-color: #26a737;
         box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
     }
     
@@ -195,13 +1853,13 @@ st.markdown("""
         left: 0;
         right: 0;
         height: 4px;
-        background: #2ca02c;
+        background: #26a737;
     }
     
     div[data-testid="stMetricValue"] {
         font-size: 28px;
         font-weight: 700;
-        color: #2ca02c;
+        color: #26a737;
         margin-bottom: 8px;
     }
     
@@ -220,7 +1878,7 @@ st.markdown("""
     
     /* Botões estilo relatório formal */
     .stButton > button {
-        background: #2ca02c;
+        background: #26a737;
         color: white;
         border: none;
         border-radius: 6px;
@@ -232,7 +1890,7 @@ st.markdown("""
     }
     
     .stButton > button:hover {
-        background: #2ca02c;
+        background: #26a737;
         box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
     }
     
@@ -283,7 +1941,7 @@ st.markdown("""
     
     /* Headers de seção estilo relatório formal */
     .report-header {
-        background: #2ca02c;
+        background: #26a737;
         color: white;
         padding: 1rem 1.5rem;
         border-radius: 6px;
@@ -316,7 +1974,7 @@ st.markdown("""
     
     /* Cores da paleta do gráfico de habilidades */
     .color-primary { color: #2ca02c; }
-    .color-secondary { color: #ff7f0e; }
+    .color-secondary { color: #f59c00; }
     .color-success { color: #2ca02c; }
     .color-danger { color: #d62728; }
     
@@ -330,12 +1988,12 @@ st.markdown("""
     }
     
     ::-webkit-scrollbar-thumb {
-        background: #2ca02c;
+        background: #26a737;
         border-radius: 3px;
     }
     
     ::-webkit-scrollbar-thumb:hover {
-        background: #2ca02c;
+        background: #26a737;
     }
     
     /* Estilos para impressão */
@@ -561,9 +2219,46 @@ st.markdown("""
     }
     
     .stButton > button:hover {
-        background-color: #ff7f0e !important;
+        background-color: #f59c00 !important;
         transform: translateY(-2px) !important;
         box-shadow: 0 4px 12px rgba(255, 127, 14, 0.3) !important;
+    }
+    
+    /* Estilo customizado para botões de IA */
+    .stButton > button[kind="primary"] {
+        background-color: #dc3545 !important; /* Vermelho quando desativado */
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 1.5rem !important;
+        font-weight: 600 !important;
+        font-size: 1rem !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 2px 8px rgba(220, 53, 69, 0.3) !important;
+    }
+    
+    .stButton > button[kind="primary"]:hover {
+        background-color: #c82333 !important; /* Vermelho mais escuro no hover */
+        transform: translateY(-2px) !important;
+        box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4) !important;
+    }
+    
+    .stButton > button[kind="secondary"] {
+        background-color: #28a745 !important; /* Verde quando ativado */
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 1.5rem !important;
+        font-weight: 600 !important;
+        font-size: 1rem !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3) !important;
+    }
+    
+    .stButton > button[kind="secondary"]:hover {
+        background-color: #218838 !important; /* Verde mais escuro no hover */
+        transform: translateY(-2px) !important;
+        box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4) !important;
     }
     
     .stButton > button:active {
@@ -576,7 +2271,7 @@ st.markdown("""
 # Header estilo relatório formal com logos
 st.markdown("""
     <div style="
-        background: #2ca02c;
+        background: linear-gradient(135deg, #26a737, #1e7e34, #155724);
         padding: 2rem;
         border-radius: 8px;
         margin-bottom: 2rem;
@@ -797,7 +2492,7 @@ def criar_card_entidade(titulo):
     """Cria um card HTML para exibir título de entidade"""
     return f"""
         <div style="
-            border: 3px solid #358242;
+            border: 3px solid {COR_PRIMARIA};
             border-radius: 15px;
             padding: 20px 20px 5px 20px;
             background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
@@ -808,22 +2503,22 @@ def criar_card_entidade(titulo):
         ">
             <h3 style="
                 text-align: center;
-                color: #358242;
+                color: #26a737;
                 font-size: 1.4em;
                 font-weight: bold;
                 margin: 0 0 10px 0;
                 padding-bottom: 10px;
-                border-bottom: 3px solid #358242;
+                border-bottom: 3px solid {COR_PRIMARIA};
             ">{titulo}</h3>
         </div>
     """
 
-def obter_proficiencia_media(df, codigo_tipo):
+def obter_proficiencia_media(df, codigo_tipo, coluna='Proficiência Média'):
     """Obtém a proficiência média para um tipo de entidade"""
     if df is None or df.empty:
         return None
     try:
-        return df[df['Tipo de Entidade'].str.contains(codigo_tipo, case=False, na=False)]['Proficiência Média'].mean()
+        return df[df['Tipo de Entidade'].str.contains(codigo_tipo, case=False, na=False)][coluna].mean()
     except:
         return None
 
@@ -867,6 +2562,113 @@ def aplicar_substituicoes(df):
     
     return df
 
+def criar_grafico_proficiencia(df, titulo, codigo_tipo, key_suffix):
+    """
+    Cria gráfico de proficiência média com cards e banners coloridos
+    """
+    if df.empty:
+        st.warning("❌ Nenhum dado disponível para proficiência")
+        return
+    
+    # Obter proficiência média
+    prof_500 = obter_proficiencia_media(df, codigo_tipo, 'Proficiência Média 500')
+    prof_1000 = obter_proficiencia_media(df, codigo_tipo, 'Proficiência Média 1000')
+    
+    # Criar cards de proficiência
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if not pd.isna(prof_500):
+            st.metric("Proficiência 500", f"{prof_500:.0f}" if not pd.isna(prof_500) else "N/A", label_visibility="collapsed")
+        
+        with col2:
+            if not pd.isna(prof_1000):
+                st.metric("Proficiência 1000", f"{prof_1000:.0f}" if not pd.isna(prof_1000) else "N/A", label_visibility="collapsed")
+
+def criar_grafico_padrao_desempenho(df, titulo, codigo_tipo, key_suffix):
+    """
+    Cria gráfico de padrão de desempenho
+    """
+    if df.empty:
+        st.warning("❌ Nenhum dado disponível para padrão de desempenho")
+        return
+    
+    # Colunas de padrão de desempenho
+    colunas_desempenho = [col for col in df.columns if 'Padrão' in col or 'Desempenho' in col]
+    
+    if not colunas_desempenho:
+        st.warning("❌ Nenhuma coluna de padrão de desempenho encontrada")
+        return
+    
+    # Criar gráfico de barras
+    dados_grafico = []
+    for col in colunas_desempenho:
+        if col in df.columns:
+            valor = df[col].iloc[0] if not df.empty else 0
+            dados_grafico.append({
+                'Categoria': col.replace('Padrão ', '').replace('Desempenho ', ''),
+                'Valor': valor
+            })
+    
+    if dados_grafico:
+        df_grafico = pd.DataFrame(dados_grafico)
+        fig = px.bar(df_grafico, x='Categoria', y='Valor', 
+                    title=f"Distribuição por Padrão de Desempenho - {titulo}",
+                    color='Valor',
+                    color_continuous_scale=['#e06a0c', '#f59c00', '#26a737'])
+        
+        fig.update_layout(
+            showlegend=False,
+            height=400,
+            margin=dict(l=10, r=10, t=40, b=10),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, key=f"desempenho_{key_suffix}")
+
+def criar_grafico_habilidades(df, titulo, codigo_tipo, key_suffix):
+    """
+    Cria gráfico de habilidades
+    """
+    if df.empty:
+        st.warning("❌ Nenhum dado disponível para habilidades")
+        return
+    
+    # Colunas de habilidades
+    colunas_habilidade = [col for col in df.columns if 'Habilidade' in col or 'Taxa' in col]
+    
+    if not colunas_habilidade:
+        st.warning("❌ Nenhuma coluna de habilidade encontrada")
+        return
+    
+    # Criar gráfico de barras
+    dados_grafico = []
+    for col in colunas_habilidade:
+        if col in df.columns:
+            valor = df[col].iloc[0] if not df.empty else 0
+            dados_grafico.append({
+                'Habilidade': col.replace('Taxa ', '').replace('Habilidade ', ''),
+                'Taxa_Acerto': valor
+            })
+    
+    if dados_grafico:
+        df_grafico = pd.DataFrame(dados_grafico)
+        fig = px.bar(df_grafico, x='Habilidade', y='Taxa_Acerto', 
+                    title=f"Taxa de Acerto por Habilidade - {titulo}",
+                    color='Taxa_Acerto',
+                    color_continuous_scale=['#e06a0c', '#f59c00', '#26a737'])
+        
+        fig.update_layout(
+            showlegend=False,
+            height=400,
+            margin=dict(l=10, r=10, t=40, b=10),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, key=f"habilidades_{key_suffix}")
+
 def criar_gauge_participacao(df, titulo, codigo_tipo, key_suffix):
     """
     Cria um gauge de participação para um tipo específico de entidade dentro de um card
@@ -900,7 +2702,7 @@ def criar_gauge_participacao(df, titulo, codigo_tipo, key_suffix):
     # Card com altura fixa
     st.markdown(f"""
         <div style="
-            border: 3px solid #358242;
+            border: 3px solid {COR_PRIMARIA};
             border-radius: 15px;
             padding: 20px 20px 5px 20px;
             background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
@@ -911,12 +2713,12 @@ def criar_gauge_participacao(df, titulo, codigo_tipo, key_suffix):
         ">
             <h3 style="
                 text-align: center;
-                color: #358242;
+                color: #26a737;
                 font-size: 1.4em;
                 font-weight: bold;
                 margin: 0 0 10px 0;
                 padding-bottom: 10px;
-                border-bottom: 3px solid #358242;
+                border-bottom: 3px solid {COR_PRIMARIA};
             ">{titulo}</h3>
         </div>
     """, unsafe_allow_html=True)
@@ -926,11 +2728,11 @@ def criar_gauge_participacao(df, titulo, codigo_tipo, key_suffix):
         mode="gauge+number",
         value=participacao_maxima,
         domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': "Participação", 'font': {'size': 16, 'color': '#358242'}},
-        number={'suffix': "%", 'font': {'size': 28}},
+        title={'text': "", 'font': {'size': 14, 'color': COR_PRIMARIA}},
+        number={'suffix': "%", 'font': {'size': 24}},
         gauge={
             'axis': {'range': [0, 100]},
-            'bar': {'color': "#358242"},
+            'bar': {'color': COR_PRIMARIA},
             'steps': [
                 {'range': [0, 80], 'color': "#ffcccc"},
                 {'range': [80, 90], 'color': "#ffff99"},
@@ -945,11 +2747,11 @@ def criar_gauge_participacao(df, titulo, codigo_tipo, key_suffix):
     ))
     
     fig.update_layout(
-        height=200,
-        margin=dict(l=10, r=10, t=50, b=5),
+        height=150,
+        margin=dict(l=10, r=10, t=30, b=5),
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(size=16)
+                        font=dict(size=14)
     )
     st.plotly_chart(fig, use_container_width=True, key=f"gauge_{key_suffix}")
     
@@ -958,12 +2760,12 @@ def criar_gauge_participacao(df, titulo, codigo_tipo, key_suffix):
     with col1:
         st.metric(
             label="👥 Previstos", 
-            value=f"{int(total_previstos):,}".replace(',', '.')
+            value=f"{int(total_previstos):,}".replace(',', 'X').replace('.', ',').replace('X', '.')
         )
     with col2:
         st.metric(
             label="✅ Efetivos", 
-            value=f"{int(total_efetivos):,}".replace(',', '.')
+            value=f"{int(total_efetivos):,}".replace(',', 'X').replace('.', ',').replace('X', '.')
         )
 
 # ==================== INICIALIZAÇÃO DO SESSION STATE ====================
@@ -989,9 +2791,9 @@ if not st.session_state.authenticated:
     st.markdown("""
     <style>
     .stButton > button[kind="secondary"] {
-        background: linear-gradient(135deg, #ff7100, #ff8c00) !important;
+        background: linear-gradient(135deg, #e94f0e, #f59c00) !important;
         color: white !important;
-        border: 3px solid #ff7100 !important;
+        border: 3px solid #e94f0e !important;
         border-radius: 8px !important;
         font-weight: 700 !important;
         transition: all 0.3s ease !important;
@@ -1000,8 +2802,8 @@ if not st.session_state.authenticated:
         box-shadow: 0 3px 6px rgba(255, 113, 0, 0.4) !important;
     }
     .stButton > button[kind="secondary"]:hover {
-        background: linear-gradient(135deg, #e65a00, #ff7100) !important;
-        border-color: #e65a00 !important;
+        background: linear-gradient(135deg, #e06a0c, #e94f0e) !important;
+        border-color: #e06a0c !important;
         transform: translateY(-3px) !important;
         box-shadow: 0 6px 12px rgba(255, 113, 0, 0.6) !important;
     }
@@ -1035,10 +2837,12 @@ if not st.session_state.authenticated:
                 st.session_state.authenticated = True
                 st.session_state.user_code = codigo
                 
-                # Verificar se é senha mestra
+                # Verificar se é senha mestra e armazenar no session_state
                 if senha == MASTER_PASSWORD:
+                    st.session_state.master_access = True
                     st.success(f"✅ Login realizado com sucesso usando **SENHA MESTRA** para: **{ENTITY_NAMES.get(codigo, f'Entidade {codigo}')}**")
                 else:
+                    st.session_state.master_access = False
                     st.success(f"✅ Login realizado com sucesso para: **{ENTITY_NAMES.get(codigo, f'Entidade {codigo}')}**")
                 st.rerun()
     
@@ -1110,6 +2914,18 @@ else:
                     # Calcular total de registros
                     total_registros = sum(len(df) for df in lista_dfs)
                     st.success(f"✅ Dados carregados: {total_registros} registros (incluindo hierarquia)")
+                    
+                    # Opção de download do df_concatenado para usuários com senha mestra
+                    if st.session_state.get('master_access', False):
+                        st.info("🔑 **Acesso Administrativo:** Você pode baixar o dataset completo")
+                        csv_data = st.session_state.df_concatenado.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Baixar Dataset Completo (df_concatenado)",
+                            data=csv_data,
+                            file_name=f"spaece_dataset_completo_{codigo}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            key="download_dataset_completo"
+                        )
                 else:
                     st.error("❌ Erro ao processar dados")
             else:
@@ -1123,7 +2939,7 @@ else:
         
         # Header estilo relatório formal para análise dos dados
         st.markdown("""
-        <div class="report-header" style="font-size: 2rem; text-align: left;">
+        <div class="report-header" style="font-size: 2rem; text-align: left; background: linear-gradient(135deg, #2ca02c, #1e7e34, #155724);">
             📊 ANÁLISE DOS DADOS
         </div>
 
@@ -1133,68 +2949,69 @@ else:
         # ==================== INFORMAÇÕES DA ENTIDADE ====================
         st.markdown("---")
         
-        
         # Exibir informações da entidade consultada
         entidade_info = []
-    
-    # Verificar e adicionar nome da entidade principal
-    if 'NM_ENTIDADE' in df_concat.columns and not df_concat.empty:
-        entidade_nome = df_concat['NM_ENTIDADE'].iloc[0]
-        if pd.notna(entidade_nome) and str(entidade_nome).strip():
-            entidade_info.append(f"Entidade: {entidade_nome}")
-    
-    # Verificar e adicionar informações do município
-    if 'NM_MUNICIPIO' in df_concat.columns and not df_concat.empty:
-        municipio = df_concat['NM_MUNICIPIO'].iloc[0]
-        if pd.notna(municipio) and str(municipio).strip():
-            entidade_info.append(f"Município: {municipio}")
-    
-    # Verificar e adicionar informações da CREDE
-    if 'NM_REGIONAL' in df_concat.columns and not df_concat.empty:
-        crede = df_concat['NM_REGIONAL'].iloc[0]
-        if pd.notna(crede) and str(crede).strip():
-            entidade_info.append(f"CREDE: {crede}")
-    
-    # Verificar e adicionar informações do estado
-    if 'NM_ESTADO' in df_concat.columns and not df_concat.empty:
-        estado = df_concat['NM_ESTADO'].iloc[0]
-        if pd.notna(estado) and str(estado).strip():
-            entidade_info.append(f"Estado: {estado}")
-    
-    # Exibir as informações se existirem, senão mostrar Código da Entidade
-    if entidade_info:
-        # Card estilo relatório formal para informações da entidade
-        st.markdown(f"""
-        <div class="report-card">
-            <div class="report-card-header">
-                🏛️ INFORMAÇÕES DA ENTIDADE
+        
+        # Verificar e adicionar nome da entidade principal
+        if 'NM_ENTIDADE' in df_concat.columns and not df_concat.empty:
+            entidade_nome = df_concat['NM_ENTIDADE'].iloc[0]
+            if pd.notna(entidade_nome) and str(entidade_nome).strip():
+                entidade_info.append(f"Entidade: {entidade_nome}")
+        
+        # Verificar e adicionar informações do município
+        if 'NM_MUNICIPIO' in df_concat.columns and not df_concat.empty:
+            municipio = df_concat['NM_MUNICIPIO'].iloc[0]
+            if pd.notna(municipio) and str(municipio).strip():
+                entidade_info.append(f"Município: {municipio}")
+        
+        # Verificar e adicionar informações da CREDE
+        if 'NM_REGIONAL' in df_concat.columns and not df_concat.empty:
+            crede = df_concat['NM_REGIONAL'].iloc[0]
+            if pd.notna(crede) and str(crede).strip():
+                entidade_info.append(f"CREDE: {crede}")
+        
+        # Verificar e adicionar informações do estado
+        if 'NM_ESTADO' in df_concat.columns and not df_concat.empty:
+            estado = df_concat['NM_ESTADO'].iloc[0]
+            if pd.notna(estado) and str(estado).strip():
+                entidade_info.append(f"Estado: {estado}")
+        
+        # Exibir as informações se existirem, senão mostrar Código da Entidade
+        if entidade_info:
+            # Card estilo relatório formal para informações da entidade
+            # Criar o HTML com as informações da entidade
+            entidade_html = "<br>".join(entidade_info)
+            st.markdown(f"""
+            <div class="report-card">
+                <div class="report-card-header">
+                    🏛️ INFORMAÇÕES DA ENTIDADE
+                </div>
+                <div style="
+                    font-size: 1rem;
+                    line-height: 1.8;
+                    color: #374151;
+                    font-weight: 500;
+                ">
+                    {entidade_html}
+                </div>
             </div>
-            <div style="
-                font-size: 1rem;
-                line-height: 1.8;
-                color: #374151;
-                font-weight: 500;
-            ">
-                {"<br>".join(entidade_info)}
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="report-card">
+                <div class="report-card-header" style="border-bottom-color: #46ac33;">
+                    🏛️ ENTIDADE CONSULTADA
+                </div>
+                <div style="
+                    font-size: 1rem;
+                    line-height: 1.8;
+                    color: #4b5563;
+                    font-weight: 500;
+                ">
+                    <strong>Código:</strong> {st.session_state.agregado_consultado}
+                </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-        <div class="report-card">
-            <div class="report-card-header" style="border-bottom-color: #6b7280;">
-                🏛️ ENTIDADE CONSULTADA
-            </div>
-            <div style="
-                font-size: 1rem;
-                line-height: 1.8;
-                color: #4b5563;
-                font-weight: 500;
-            ">
-                <strong>Código:</strong> {st.session_state.agregado_consultado}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
     
     # # ==================== ESTATÍSTICAS GERAIS ====================
     # with st.expander("📈 Estatísticas Gerais", expanded=False):
@@ -1222,12 +3039,12 @@ else:
     # Sidebar estilo relatório formal
     with st.sidebar:
         # Imagem do painel CECOM no topo do sidebar
-        st.image("painel_cecom.png", use_container_width=True)
+        st.image("painel_cecom.png", width=300)
         
         # Card estilo relatório formal para informações da entidade no sidebar
         st.markdown("""
         <div style="
-            background: #2ca02c;
+            background: linear-gradient(135deg, #26a737, #1e7e34, #155724);
             padding: 1rem;
             border-radius: 6px;
             margin-bottom: 1rem;
@@ -1303,7 +3120,7 @@ else:
         # Header estilo relatório formal para filtros
         st.markdown("""
         <div style="
-            background: #2ca02c;
+            background: linear-gradient(135deg, #26a737, #1e7e34, #155724);
             padding: 0.8rem;
             border-radius: 4px;
             margin: 1rem 0;
@@ -1371,6 +3188,98 @@ else:
                 rede_selecionada = st.selectbox("Selecione a Rede", redes_unicas, key="rede_selecionada")
                 if rede_selecionada:
                     df_concat = df_concat[df_concat['VL_FILTRO_REDE'] == rede_selecionada]
+        
+        # Seção de controle da IA
+        st.markdown("---")
+        st.markdown("""
+        <div style="
+            background: linear-gradient(135deg, #f8f9fa, #e9ecef, #dee2e6);
+            padding: 1.5rem;
+            border-radius: 8px;
+            border-left: 4px solid #007bff;
+            margin: 1rem 0;
+        ">
+            <h4 style="color: #007bff; margin: 0 0 1rem 0;">🤖 Análise Inteligente com IA</h4>
+            <p style="margin: 0 0 1rem 0; color: #6c757d;">
+                Ative as análises inteligentes com IA para obter insights avançados dos dados. 
+                <strong>Este processo carregará as bases de dados (DCRC e BNCC) e pode demorar alguns minutos</strong>.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Inicializar estado da IA se não existir (começar desligada)
+        if 'ia_ativa' not in st.session_state:
+            st.session_state.ia_ativa = False
+        
+        col1, col2, col3 = st.columns([0.5, 3, 0.5])
+        with col2:
+            if st.session_state.ia_ativa:
+                if st.button("🤖 Desativar Análise IA", type="secondary", use_container_width=True, 
+                            help="Clique para desativar as análises inteligentes com IA"):
+                    st.session_state.ia_ativa = False
+                    st.rerun()
+            else:
+                if st.button("🤖 Ativar Análise IA", type="primary", use_container_width=True,
+                            help="Clique para ativar as análises inteligentes com IA"):
+                    # Carregar arquivos Markdown quando ativar a IA
+                    try:
+                        with st.spinner("🔄 Carregando bases de dados..."):
+                            # Carregar DCRC
+                            with st.spinner("🔄 Carregando DCRC..."):
+                                texto_dcrc = extrair_texto_md("dcrc.md")
+                            
+                            # Carregar BNCC
+                            with st.spinner("🔄 Carregando BNCC..."):
+                                texto_bncc = extrair_texto_md("bncc.md")
+                            
+                            if texto_dcrc and texto_bncc:
+                                with st.spinner("🤖 Processando documentos com RAG..."):
+                                    # Combinar textos dos dois arquivos Markdown
+                                    texto_combinado = f"DCRC:\n{texto_dcrc}\n\nBNCC:\n{texto_bncc}"
+                                    dados_rag = processar_md_com_rag(texto_combinado)
+                                
+                                if dados_rag:
+                                    st.session_state.documentos_referencia = texto_combinado
+                                    st.session_state.dados_rag = dados_rag
+                                    st.session_state.documentos_carregados = True
+                                    st.session_state.ia_ativa = True
+                                    st.success("✅ IA ativada com sucesso! Bases carregadas e análises inteligentes habilitadas.")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Erro ao processar os documentos. Tente novamente.")
+                            else:
+                                st.error("❌ Erro ao extrair texto dos PDFs. Verifique se os arquivos estão corretos.")
+                                
+                    except FileNotFoundError as e:
+                        st.error(f"❌ Arquivo não encontrado: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Erro ao carregar PDFs: {e}")
+        
+        # Mostrar status atual da IA
+        if st.session_state.ia_ativa:
+            st.markdown("""
+            <div style="
+                background: #e8f5e8;
+                padding: 0.8rem;
+                border-radius: 6px;
+                border-left: 4px solid #28a745;
+                margin: 1rem 0;
+            ">
+                <strong>✅ IA Ativa:</strong> Bases carregadas e análises inteligentes habilitadas
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="
+                background: #f8f9fa;
+                padding: 0.8rem;
+                border-radius: 6px;
+                border-left: 4px solid #6c757d;
+                margin: 1rem 0;
+            ">
+                <strong>⏸️ IA Inativa:</strong> Análises inteligentes desabilitadas
+            </div>
+            """, unsafe_allow_html=True)
     
     # ==================== TAXA DE PARTICIPAÇÃO ====================
     colunas_participacao = ['TP_ENTIDADE','NM_ENTIDADE','QT_ALUNO_PREVISTO','QT_ALUNO_EFETIVO', 
@@ -1385,10 +3294,31 @@ else:
         # Só aplicar quebra de página se houver dados válidos após processamento
         if not df_participacao.empty:
             st.markdown("""
-            <div class="report-header same-page-section" style="background: #2ca02c;">
+            <div class="report-header same-page-section" style="background: linear-gradient(135deg, #2ca02c, #1e7e34, #155724);">
                 📊 TAXA DE PARTICIPAÇÃO
             </div>
             """, unsafe_allow_html=True)
+            
+            # Help para análise do gráfico
+            with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+                st.markdown("""
+                **📊 Taxa de Participação - Informações Técnicas**
+                
+                **Construção do gráfico:**
+                - **Tipo:** Gauge (medidor circular) com escala de 0% a 100%
+                - **Cores:** Verde (90-100%), Amarelo (80-89%), Vermelho (<80%)
+                - **Dados:** Taxa de participação = (Alunos Efetivos ÷ Alunos Previstos) × 100
+                
+                **O que representa:**
+                - **Taxa de Participação:** Percentual de alunos que efetivamente participaram da avaliação
+                - **Alunos Previstos:** Total de alunos matriculados que deveriam participar
+                - **Alunos Efetivos:** Alunos que realmente fizeram a prova
+                
+                **Como ler:**
+                - **Ponteiro:** Indica a taxa de participação atual
+                - **Zonas coloridas:** Mostram faixas de classificação
+                - **Valor numérico:** Taxa exata de participação
+                """)
             
             # Converter para numérico
             df_participacao = converter_para_numerico(
@@ -1397,7 +3327,7 @@ else:
             )
             
             # Gauges de participação
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4 = st.columns([1.2, 1, 1, 1])
             
             with col1:
                 criar_gauge_participacao(df_participacao, "Ceará", CODIGOS_ENTIDADE['ESTADO'], "ceara")
@@ -1420,6 +3350,31 @@ else:
                 mime="text/csv",
                 key="download_participacao"
             )
+            
+            # Análise com Groq
+            with st.expander("🤖 Análise Inteligente - Taxa de Participação", expanded=False):
+                if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                    st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                    
+                    # Criar chave única baseada nos filtros atuais
+                    etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                    disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                    key_analise = f"analise_participacao_{etapa_filtro}_{disciplina_filtro}"
+                    
+                    if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                        with st.spinner("🤖 Analisando dados com IA..."):
+                            analise = analisar_dataframe_com_groq(
+                                df_participacao, 
+                                "Taxa de Participação", 
+                                "Análise da participação dos estudantes nas avaliações SPAECE. IMPORTANTE: O ideal é manter 100% de participação. Destaque como altas taxas de participação podem trazer recursos para o município, melhorar a estrutura da escola e servir de subsídio para implementar planos de cargos e carreiras e aumento de salário dos profissionais da educação, especialmente professores. Considere que participação alta é indicador de qualidade educacional e pode resultar em mais investimentos e melhorias estruturais.",
+                                st.session_state.agregado_consultado,
+                                st.session_state.df_concatenado
+                            )
+                            st.markdown(analise)
+                elif not st.session_state.get('documentos_carregados', False):
+                    st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+                else:
+                    st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
         else:
             st.info("Sem dados válidos de participação após processamento")
     else:
@@ -1430,24 +3385,47 @@ else:
     
     # ==================== PROFICIÊNCIA MÉDIA ====================
     st.markdown("""
-    <div class="report-header same-page-section" style="background: #2ca02c;">
+    <div class="report-header same-page-section" style="background: linear-gradient(135deg, #2ca02c, #1e7e34, #155724);">
         📈 PROFICIÊNCIA MÉDIA
     </div>
     """, unsafe_allow_html=True)
-    colunas_proficiencia = ['TP_ENTIDADE','NM_ENTIDADE','AVG_PROFICIENCIA_E1','VL_FILTRO_DISCIPLINA','VL_FILTRO_ETAPA']
+    
+    # Help para análise do gráfico
+    with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+        st.markdown("""
+        **📈 Proficiência Média - Informações Técnicas**
+        
+        **Construção do gráfico:**
+        - **Tipo:** Cards com métricas e banners coloridos
+        - **Escalas:** Duas escalas diferentes (0-500 e 0-1000)
+        - **Layout:** 4 colunas lado a lado (Estado, CREDE, Município, Escola)
+        
+        **O que representa:**
+        - **Proficiência Média 500:** Pontuação média na escala de 0 a 500 pontos (2º e 5º anos)
+        - **Proficiência Média 1000:** Pontuação média na escala de 0 a 1000 pontos (9º ano e EM)
+        - **Banners:** Verde (escala 500) e Laranja (escala 1000)
+        
+        **Como ler:**
+        - **Valores numéricos:** Pontuação média exata de cada entidade
+        - **Banners coloridos:** Identificam qual escala está sendo mostrada
+        - **Comparação:** Valores podem ser comparados entre as entidades
+        """)
+    
+    colunas_proficiencia = ['TP_ENTIDADE','NM_ENTIDADE','AVG_PROFICIENCIA_E1','AVG_PROFICIENCIA_E2','VL_FILTRO_DISCIPLINA','VL_FILTRO_ETAPA']
     
     if not df_concat.empty and all(col in df_concat.columns for col in colunas_proficiencia):
         df_proficiencia = df_concat[colunas_proficiencia].dropna().copy()
         df_proficiencia = df_proficiencia[df_proficiencia['VL_FILTRO_DISCIPLINA'] != 'Língua Portuguesa - Escrita e Leitura']
-        df_proficiencia.columns = ['Tipo de Entidade', 'Entidade', 'Proficiência Média', 'Componente Curricular', 'Etapa']
+        df_proficiencia.columns = ['Tipo de Entidade', 'Entidade', 'Proficiência Média 500', 'Proficiência Média 1000', 'Componente Curricular', 'Etapa']
         
         # Converter para numérico
-        df_proficiencia['Proficiência Média'] = pd.to_numeric(df_proficiencia['Proficiência Média'], errors='coerce')
+        df_proficiencia['Proficiência Média 500'] = pd.to_numeric(df_proficiencia['Proficiência Média 500'], errors='coerce')
+        df_proficiencia['Proficiência Média 1000'] = pd.to_numeric(df_proficiencia['Proficiência Média 1000'], errors='coerce')
         
         # DataFrame para exibição (sem a coluna Tipo de Entidade)
-        df_proficiencia_display = df_proficiencia[['Entidade', 'Proficiência Média', 'Componente Curricular', 'Etapa']].copy()
+        df_proficiencia_display = df_proficiencia[['Entidade', 'Proficiência Média 500', 'Proficiência Média 1000', 'Componente Curricular', 'Etapa']].copy()
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4 = st.columns([1.2, 1, 1, 1])
         
         # Cards de proficiência
         entidades = [
@@ -1460,8 +3438,38 @@ else:
         for i, (nome, codigo) in enumerate(entidades):
             with [col1, col2, col3, col4][i]:
                 st.markdown(criar_card_entidade(nome), unsafe_allow_html=True)
-                proficiencia = obter_proficiencia_media(df_proficiencia, codigo)
-                st.metric("📊 Proficiência", f"{proficiencia:.0f}" if not pd.isna(proficiencia) else "N/A")
+                proficiencia_500 = obter_proficiencia_media(df_proficiencia, codigo, 'Proficiência Média 500')
+                proficiencia_1000 = obter_proficiencia_media(df_proficiencia, codigo, 'Proficiência Média 1000')
+                
+                # Espaço em cima dos banners
+                st.markdown("<br>", unsafe_allow_html=True)
+                
+                # Layout lado a lado para as duas escalas
+                escala_col1, escala_col2 = st.columns(2)
+                
+                with escala_col1:
+                    # Banner destacado para Escala 500
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, {COR_PRIMARIA}, {COR_SUCESSO}); 
+                               color: white; padding: 8px 10px; border-radius: 6px; 
+                               text-align: center; font-weight: bold; font-size: 14px;
+                               margin-bottom: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                        📊 Escala<br>0-500
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.metric("Proficiência 500", f"{proficiencia_500:.0f}" if not pd.isna(proficiencia_500) else "N/A", label_visibility="collapsed")
+                
+                with escala_col2:
+                    # Banner destacado para Escala 1000
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, {COR_SECUNDARIA}, {COR_ACENTO}); 
+                               color: white; padding: 8px 10px; border-radius: 6px; 
+                               text-align: center; font-weight: bold; font-size: 14px;
+                               margin-bottom: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                        📊 Escala<br>0-1000
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.metric("Proficiência 1000", f"{proficiencia_1000:.0f}" if not pd.isna(proficiencia_1000) else "N/A", label_visibility="collapsed")
         
         #Download
         csv_prof = df_proficiencia_display.to_csv(index=False).encode('utf-8')
@@ -1472,6 +3480,31 @@ else:
             mime="text/csv",
             key="download_proficiencia"
         )
+        
+        # Análise com Groq
+        with st.expander("🤖 Análise Inteligente - Proficiência Média", expanded=False):
+            if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                
+                # Criar chave única baseada nos filtros atuais
+                etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                key_analise = f"analise_proficiencia_{etapa_filtro}_{disciplina_filtro}"
+                
+                if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                    with st.spinner("🤖 Analisando dados com IA..."):
+                        analise = analisar_dataframe_com_groq(
+                            df_proficiencia_display, 
+                            "Proficiência Média", 
+                            "Análise dos níveis de proficiência dos estudantes nas avaliações SPAECE (escalas 500 e 1000)",
+                            st.session_state.agregado_consultado,
+                            st.session_state.df_concatenado
+                        )
+                        st.markdown(analise)
+            elif not st.session_state.get('documentos_carregados', False):
+                st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+            else:
+                st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
     else:
         st.info("Colunas necessárias não encontradas para exibir proficiência")
     
@@ -1488,11 +3521,38 @@ else:
         </div>
         """, unsafe_allow_html=True)
         
-        st.markdown("""
-        <div class="report-header" style="background: #ff7f0e;">
+        st.markdown(f"""
+        <div class="report-header" style="background: linear-gradient(135deg, {COR_SECUNDARIA}, #e67e22, #d35400);">
             📊 DISTRIBUIÇÃO POR PADRÃO DE DESEMPENHO
         </div>
         """, unsafe_allow_html=True)
+        
+        # Help para análise do gráfico
+        with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+            st.markdown("""
+            **📊 Distribuição por Padrão de Desempenho - Informações Técnicas**
+            
+            **Construção do gráfico:**
+            - **Tipo:** Gráfico de barras empilhadas (stacked bar chart)
+            - **Eixo X:** Entidades (Estado, CREDE, Município, Escola)
+            - **Eixo Y:** Percentual de alunos (0% a 100%)
+            - **Barras:** Divididas em 5 segmentos (Níveis 1-5)
+            
+            **O que representa:**
+            - **Nível 1-5:** Classificação dos estudantes por padrões de desempenho
+            - **Percentual:** Proporção de alunos em cada nível
+            - **Hover:** Mostra quantidade de alunos e percentual por nível
+            
+            **Padrões por etapa:**
+            - **2º Ano:** Não Alfabetizado → Alfabetização Incompleta → Intermediário → Suficiente → Desejável
+            - **5º/9º Ano:** Muito Crítico → Crítico → Intermediário → Adequado
+            
+            **Como ler:**
+            - **Altura total:** 100% dos alunos avaliados
+            - **Segmentos coloridos:** Proporção em cada nível de desempenho
+            - **Hover:** Detalhes específicos de cada segmento
+            """)
+        
         # Usar dropna apenas nas colunas essenciais, não nas de desempenho
         df_desempenho = df_concat[colunas_desempenho].dropna(
             subset=['TP_ENTIDADE', 'DC_TIPO_ENTIDADE', 'NM_ENTIDADE', 'VL_FILTRO_DISCIPLINA', 'VL_FILTRO_ETAPA']
@@ -1578,13 +3638,24 @@ else:
                 niveis = ['Taxa Nível 1', 'Taxa Nível 2', 'Taxa Nível 3', 'Taxa Nível 4', 'Taxa Nível 5']
                 cores = ['#e30513', '#fdc300', '#ffed00', '#cce4ce', '#1ca041']
                 # Nomes para a legenda do 2º ano
-                nomes_legenda = ['Não Alfabetizado', 'Alfabetização Incompleta', 'Intermediário', 'Suficiente', 'Avançado']
-            else:
-                # 5º e 9º ano têm 4 níveis
+                nomes_legenda = ['Não Alfabetizado', 'Alfabetização Incompleta', 'Intermediário', 'Suficiente', 'Desejável']
+            elif etapa_atual and '5º Ano' in etapa_atual:
+                # 5º ano tem 4 níveis
                 niveis = ['Taxa Nível 1', 'Taxa Nível 2', 'Taxa Nível 3', 'Taxa Nível 4']
                 cores = ['#e30513', '#fdc300', '#cce4ce','#1ca041']
-                # Nomes para a legenda do 5º e 9º ano
-                nomes_legenda = ['Muito Crítico', 'Crítico', 'Intermediário', 'Avançado']
+                # Nomes para a legenda do 5º ano
+                nomes_legenda = ['Muito Crítico', 'Crítico', 'Intermediário', 'Adequado']
+            elif etapa_atual and '9º Ano' in etapa_atual:
+                # 9º ano tem 4 níveis
+                niveis = ['Taxa Nível 1', 'Taxa Nível 2', 'Taxa Nível 3', 'Taxa Nível 4']
+                cores = ['#e30513', '#fdc300', '#cce4ce','#1ca041']
+                # Nomes para a legenda do 9º ano
+                nomes_legenda = ['Muito Crítico', 'Crítico', 'Intermediário', 'Adequado']
+            else:
+                # Fallback para outras etapas
+                niveis = ['Taxa Nível 1', 'Taxa Nível 2', 'Taxa Nível 3', 'Taxa Nível 4']
+                cores = ['#e30513', '#fdc300', '#cce4ce','#1ca041']
+                nomes_legenda = ['Muito Crítico', 'Crítico', 'Intermediário', 'Adequado']
             
             # Filtrar apenas os níveis que existem nos dados
             niveis_existentes = [nivel for nivel in niveis if nivel in df_agregado.columns]
@@ -1608,7 +3679,7 @@ else:
                     # Buscar quantidade de alunos correspondente (coluna Nível 1, Nível 2, etc.)
                     # O percentual já vem da coluna Taxa Nível X, agora buscamos a quantidade da coluna Nível X
                     quantidade_alunos = df_agregado[df_agregado['Tipo de Entidade Descrição'] == entidade_desc][coluna_numerica].iloc[0] if coluna_numerica in df_agregado.columns else 0
-                    hover_data.append(f'<b>{entidade_desc}</b><br>Nível: {nomes_legenda_filtrados[i]}<br>Percentual: {percentual:.1f}%<br>Quantidade de Alunos: {quantidade_alunos:.0f}')
+                    hover_data.append(f'<b>{entidade_desc}</b><br>Nível: {nomes_legenda_filtrados[i]}<br>Percentual: {percentual:.1f}%<br>Quantidade de Alunos: {quantidade_alunos:,.0f}'.replace('.', ',').replace(',', 'X').replace('X', '.', 1))
                 
                 fig.add_trace(go.Bar(
                     name=nomes_legenda_filtrados[i],
@@ -1618,7 +3689,7 @@ else:
                     marker_color=cores[i],
                     customdata=hover_data,
                     hovertemplate='%{customdata}<extra></extra>',
-                    text=dados_nivel['Percentual'].round(2).astype(str) + '%',
+                    text=dados_nivel['Percentual'].apply(lambda x: f'{x:.2f}'.replace('.', ',')) + '%',
                     textposition='inside',
                     textfont=dict(size=20, color='black')
                 ))
@@ -1649,25 +3720,25 @@ else:
                 barmode='stack',
                 title=dict(
                     text='Distribuição por Padrão de Desempenho',
-                    font=dict(size=20, family='Arial Black')
+                        font=dict(size=18, family='Arial Black')
                 ),
                 xaxis_title=dict(
                     text='Percentual (%)',
-                    font=dict(size=16)
+                        font=dict(size=14)
                 ),
                 yaxis_title=dict(
                     text='Entidade',
-                    font=dict(size=16)
+                        font=dict(size=14)
                 ),
                 legend=dict(
                     title=dict(
                         text='Padrão de Desempenho',
-                        font=dict(size=16)
+                        font=dict(size=14)
                     ),
                     font=dict(size=14)
                 ),
-                font=dict(size=16),
-                height=500,
+                        font=dict(size=14),
+                height=400,
                 yaxis=dict(
                     categoryorder='array', 
                     categoryarray=ordem_manual,
@@ -1693,6 +3764,42 @@ else:
                 mime="text/csv",
                 key="download_desempenho"
             )
+            
+            # Análise com Groq
+            with st.expander("🤖 Análise Inteligente - Distribuição por Desempenho", expanded=False):
+                if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                    st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                    
+                    # Criar chave única baseada nos filtros atuais
+                    etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                    disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                    key_analise = f"analise_desempenho_{etapa_filtro}_{disciplina_filtro}"
+                    
+                    if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                        with st.spinner("🤖 Analisando dados com IA..."):
+                            # Determinar os termos da legenda baseado na etapa
+                            etapa_atual = df_desempenho['Etapa'].iloc[0] if 'Etapa' in df_desempenho.columns and len(df_desempenho) > 0 else None
+                            if etapa_atual and '2º Ano' in etapa_atual:
+                                termos_legenda = "Não Alfabetizado, Alfabetização Incompleta, Intermediário, Suficiente, Desejável"
+                            elif etapa_atual and '5º Ano' in etapa_atual:
+                                termos_legenda = "Muito Crítico, Crítico, Intermediário, Adequado"
+                            elif etapa_atual and '9º Ano' in etapa_atual:
+                                termos_legenda = "Muito Crítico, Crítico, Intermediário, Adequado"
+                            else:
+                                termos_legenda = "Muito Crítico, Crítico, Intermediário, Adequado"
+                            
+                            analise = analisar_dataframe_com_groq(
+                                df_desempenho, 
+                                "Distribuição por Desempenho", 
+                                f"Análise da distribuição dos estudantes por padrões de desempenho ({termos_legenda})",
+                                st.session_state.agregado_consultado,
+                                st.session_state.df_concatenado
+                            )
+                            st.markdown(analise)
+                elif not st.session_state.get('documentos_carregados', False):
+                    st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+                else:
+                    st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
     else:
         st.info("Colunas necessárias não encontradas para exibir distribuição de desempenho")
     
@@ -1709,10 +3816,41 @@ else:
         
         # Só exibir o header se houver dados
         st.markdown("""
-        <div class="report-header" style="background: #d62728;">
+        <div class="report-header" style="background: linear-gradient(135deg, #d62728, #c82333, #a71e2a);">
             📚 TAXA DE ACERTO POR HABILIDADE
         </div>
         """, unsafe_allow_html=True)
+        
+        # Help para análise do gráfico
+        with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+            st.markdown("""
+            **📚 Taxa de Acerto por Habilidade - Informações Técnicas**
+            
+            **Construção do gráfico:**
+            - **Tipo:** Gráfico de barras agrupadas (grouped bar chart)
+            - **Eixo X:** Código da Habilidade (identificador único)
+            - **Eixo Y:** Taxa de acerto (0% a 100%)
+            - **Barras:** Agrupadas por tipo de entidade (Ceará, CREDE, Município, Escola)
+            
+            **O que representa:**
+            - **Taxa de Acerto:** Percentual de questões corretas por habilidade específica
+            - **Código da Habilidade:** Identificador único de cada competência
+            - **Habilidade:** Descrição da competência avaliada
+            - **Comparação:** Entre tipos de entidade para cada habilidade
+            
+            **Como ler:**
+            - **Altura da barra:** Taxa de acerto da habilidade para cada entidade
+            - **Cores das barras:** Cada cor representa um tipo de entidade
+            - **Agrupamento:** Barras lado a lado para comparar entidades
+            - **Hover:** Mostra código, taxa de acerto e descrição da habilidade
+            
+            **Dados disponíveis:**
+            - **Taxa de Acerto:** Percentual de questões corretas
+            - **Código da Habilidade:** Identificador técnico
+            - **Habilidade:** Descrição da competência
+            - **Tipo de Entidade:** Ceará, CREDE, Município ou Escola
+            """)
+        
         df_habilidade = df_concat[colunas_habilidade].copy()
         
         df_habilidade.columns = ['Tipo de Entidade Código', 'Tipo de Entidade', 'Entidade', 'Componente Curricular', 'Etapa', 
@@ -1780,11 +3918,11 @@ else:
                             name=tipo,
                             x=df_tipo['Código Habilidade'],
                             y=df_tipo['Taxa de Acerto'],
-                            text=df_tipo['Taxa de Acerto'].round(1).astype(str) + '%',
+                            text=df_tipo['Taxa de Acerto'].apply(lambda x: f'{x:.1f}'.replace('.', ',')) + '%',
                             textposition='auto',
                             textfont=dict(size=12, family='Arial', color='black'),
                             marker_color=cores_tipos.get(tipo, '#999999'),
-                            hovertemplate='<b style="font-size:18px">%{fullData.name}</b><br><span style="font-size:16px">Código: %{x}<br>Taxa de Acerto: %{y:.1f}%<br>Habilidade: %{customdata}</span><extra></extra>',
+                            hovertemplate=f'<b style="font-size:18px">{tipo}</b><br><span style="font-size:16px">Código: %{{x}}<br>Taxa de Acerto: %{{y:.1f}}%<br>Habilidade: %{{customdata}}</span><extra></extra>'.replace('.', ','),
                             customdata=df_tipo['Habilidade']
                         ))
                 
@@ -1792,25 +3930,25 @@ else:
                 fig_habilidade.update_layout(
                     title=dict(
                         text='Taxa de Acerto por Habilidade - Comparação entre Tipos de Entidade',
-                        font=dict(size=20, family='Arial Black')
+                        font=dict(size=18, family='Arial Black')
                     ),
                     xaxis_title=dict(
                         text='Código da Habilidade',
-                        font=dict(size=16)
+                        font=dict(size=14)
                     ),
                     yaxis_title=dict(
                         text='Taxa de Acerto (%)',
-                        font=dict(size=16)
+                        font=dict(size=14)
                     ),
                     legend=dict(
                         title=dict(
                             text='Tipo de Entidade',
-                            font=dict(size=16)
+                            font=dict(size=14)
                         ),
                         font=dict(size=14)
                     ),
-                    font=dict(size=16),
-                    height=500,
+                        font=dict(size=14),
+                    height=400,
                     yaxis=dict(
                         range=[0, 100],
                         tickfont=dict(size=15)
@@ -1840,6 +3978,31 @@ else:
             mime="text/csv",
             key="download_habilidade"
         )
+        
+        # Análise com Groq
+        with st.expander("🤖 Análise Inteligente - Taxa de Acerto por Habilidade", expanded=False):
+            if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                
+                # Criar chave única baseada nos filtros atuais
+                etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                key_analise = f"analise_habilidade_{etapa_filtro}_{disciplina_filtro}"
+                
+                if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                    with st.spinner("🤖 Analisando dados com IA..."):
+                        analise = analisar_dataframe_com_groq(
+                            df_habilidade, 
+                            "Taxa de Acerto por Habilidade", 
+                            "Análise das habilidades específicas dos estudantes nas avaliações SPAECE. IMPORTANTE: Considere que as habilidades têm hierarquia de pré-requisitos - algumas são mais básicas e fundamentais que outras. Foque sempre em fortalecer as habilidades mais basilares primeiro, pois elas são pré-requisito para o desenvolvimento das demais. Identifique quais habilidades básicas precisam de mais atenção e como elas impactam o desenvolvimento das habilidades mais avançadas.",
+                            st.session_state.agregado_consultado,
+                            st.session_state.df_concatenado
+                        )
+                        st.markdown(analise)
+            elif not st.session_state.get('documentos_carregados', False):
+                st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+            else:
+                st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
     else:
         st.info("Colunas necessárias não encontradas para exibir taxa de acerto por habilidade")
     
@@ -1865,10 +4028,39 @@ else:
         
         # Só exibir o header se houver dados
         st.markdown("""
-        <div class="report-header" style="background: #2ca02c;">
+        <div class="report-header" style="background: linear-gradient(135deg, #2ca02c, #1e7e34, #155724);">
             👥 PROFICIÊNCIA POR ETNIA
         </div>
         """, unsafe_allow_html=True)
+        
+        # Help para análise do gráfico
+        with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+            st.markdown("""
+            **👥 Proficiência por Etnia - Informações Técnicas**
+            
+            **Construção do gráfico:**
+            - **Tipo:** Gráfico de barras agrupadas (grouped bar chart)
+            - **Eixo X:** Entidades (Estado, CREDE, Município, Escola)
+            - **Eixo Y:** Taxa de participação (0% a 100%)
+            - **Cores:** Baseadas na proficiência média de cada grupo étnico
+            
+            **O que representa:**
+            - **Altura da barra:** Taxa de participação por grupo étnico
+            - **Cor da barra:** Proficiência média do grupo (escala dinâmica)
+            - **Grupos étnicos:** Preta, Branca, Parda, Amarela, Indígena
+            
+            **Como ler:**
+            - **Altura:** Percentual de participação na avaliação
+            - **Cor:** Nível de proficiência (🟠 Baixa, 🟡 Média, 🟢 Alta)
+            - **Legenda:** Escala de proficiência dinâmica
+            - **Hover:** Valores específicos de participação e proficiência
+            
+            **Dados disponíveis:**
+            - **Taxa de Participação:** Percentual de alunos que participaram
+            - **Proficiência Média:** Pontuação média do grupo
+            - **Número de Alunos:** Quantidade de estudantes por grupo
+            """)
+        
         df_etnia = df_concat[colunas_etnia_disponiveis].copy()
         
         colunas_valores_etnia = ['VL_PRETA', 'VL_BRANCA', 'VL_PARDA', 'VL_AMARELA', 'VL_INDIGENA',
@@ -1961,11 +4153,11 @@ else:
                 
                 # Categorias de etnia
                 categorias = {
-                    'Preta': {'taxa': 'Taxa Preta', 'prof': 'Proficiência Preta', 'numero': 'Número Preta', 'cor_base': '#2ca02c'},
-                    'Branca': {'taxa': 'Taxa Branca', 'prof': 'Proficiência Branca', 'numero': 'Número Branca', 'cor_base': '#ff7f0e'},
-                    'Parda': {'taxa': 'Taxa Parda', 'prof': 'Proficiência Parda', 'numero': 'Número Parda', 'cor_base': '#2ca02c'},
-                    'Amarela': {'taxa': 'Taxa Amarela', 'prof': 'Proficiência Amarela', 'numero': 'Número Amarela', 'cor_base': '#d62728'},
-                    'Indígena': {'taxa': 'Taxa Indígena', 'prof': 'Proficiência Indígena', 'numero': 'Número Indígena', 'cor_base': '#9467bd'}
+                    'Preta': {'taxa': 'Taxa Preta', 'prof': 'Proficiência Preta', 'numero': 'Número Preta', 'cor_base': COR_PRIMARIA},
+                    'Branca': {'taxa': 'Taxa Branca', 'prof': 'Proficiência Branca', 'numero': 'Número Branca', 'cor_base': COR_SECUNDARIA},
+                    'Parda': {'taxa': 'Taxa Parda', 'prof': 'Proficiência Parda', 'numero': 'Número Parda', 'cor_base': COR_SUCESSO},
+                    'Amarela': {'taxa': 'Taxa Amarela', 'prof': 'Proficiência Amarela', 'numero': 'Número Amarela', 'cor_base': COR_DANGER},
+                    'Indígena': {'taxa': 'Taxa Indígena', 'prof': 'Proficiência Indígena', 'numero': 'Número Indígena', 'cor_base': COR_LIGHT}
                 }
                 
                 # Função para calcular cor baseada na proficiência (laranja -> verde)
@@ -2034,7 +4226,7 @@ else:
                                         'Proficiência': proficiencia,
                                         'Numero': numero,
                                         'Cor': cor,
-                                        'Label': f"{cat_nome}<br>{taxa:.1f}%"
+                                        'Label': f"{cat_nome}<br>{taxa:.1f}%".replace('.', ',')
                                     })
                 
                 # Criar DataFrame dos dados
@@ -2065,11 +4257,11 @@ else:
                                 color=df_etnia_cat['Cor'].tolist(),
                                 line=dict(color='rgba(0,0,0,0.3)', width=1)
                             ),
-                            text=[f"{e}<br>{t:.1f}%<br>Prof: {p:.0f}<br>N: {n:.0f}" for e, t, p, n in zip(df_etnia_cat['Etnia'], df_etnia_cat['Taxa'], df_etnia_cat['Proficiência'], df_etnia_cat['Numero'])],
+                            text=[f"{e}<br>{t:.1f}%<br>Prof: {p:.0f}<br>N: {n:.0f}".replace('.', ',') for e, t, p, n in zip(df_etnia_cat['Etnia'], df_etnia_cat['Taxa'], df_etnia_cat['Proficiência'], df_etnia_cat['Numero'])],
                             textposition='outside',
                             textfont=dict(size=12, family='Arial', color='black'),
                             textangle=-90,
-                            hovertemplate='<b style="font-size:18px">Tipo: %{x}</b><br><span style="font-size:16px">Etnia: ' + etnia + '<br>Percentual de Alunos: %{y:.1f}%<br>Proficiência: %{customdata[0]:.1f}<br>Número de Alunos: %{customdata[1]:,}</span><extra></extra>',
+                            hovertemplate='<b style="font-size:18px">Tipo: %{x}</b><br><span style="font-size:16px">Etnia: ' + etnia + '<br>Percentual de Alunos: %{y:.1f}%<br>Proficiência: %{customdata[0]:.1f}<br>Número de Alunos: %{customdata[1]:,}</span><extra></extra>'.replace('%{y:.1f}%', '%{y:.1f}%').replace('%{customdata[0]:.1f}', '%{customdata[0]:.1f}').replace('.', ','),
                             customdata=list(zip(df_etnia_cat['Proficiência'], df_etnia_cat['Numero'])),
                             showlegend=False
                         ))
@@ -2081,7 +4273,7 @@ else:
                     fig_etnia.update_layout(
                         title=dict(
                             text=f'👥 Taxa (altura) e Proficiência (cor) por Etnia<br><sub style="font-size:14px;">🟠 Laranja = Proficiência Baixa | 🟡 Amarelo = Proficiência Média | 🟢 Verde = Proficiência Alta | Escala: {prof_min:.0f} - {prof_max:.0f}</sub>',
-                            font=dict(size=20, family='Arial Black')
+                            font=dict(size=18, family='Arial Black')
                         ),
                         xaxis_title=dict(
                             text='Tipo de Entidade',
@@ -2091,20 +4283,20 @@ else:
                             text='Taxa (%)',
                             font=dict(size=18)
                         ),
-                        font=dict(size=16),
-                        height=600,
+                        font=dict(size=14),
+                        height=450,
                         barmode='group',
                         bargap=0.2,
                         bargroupgap=0.15,
                         yaxis=dict(
                             range=[0, 110],
-                            tickfont=dict(size=16)
+                            tickfont=dict(size=14)
                         ),
                         showlegend=False,
                         xaxis=dict(
                             categoryorder='array',
                             categoryarray=tipos_disponiveis,
-                            tickfont=dict(size=16)
+                            tickfont=dict(size=14)
                         ),
                         hoverlabel=dict(
                             font_size=20,
@@ -2126,10 +4318,36 @@ else:
                 mime="text/csv",
                 key="download_etnia"
             )
+            
+            # Análise com Groq
+            with st.expander("🤖 Análise Inteligente - Proficiência por Etnia", expanded=False):
+                if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                    st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                    
+                    # Criar chave única baseada nos filtros atuais
+                    etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                    disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                    key_analise = f"analise_etnia_{etapa_filtro}_{disciplina_filtro}"
+                    
+                    if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                        with st.spinner("🤖 Analisando dados com IA..."):
+                            analise = analisar_dataframe_com_groq(
+                                df_etnia, 
+                                "Proficiência por Etnia", 
+                            "Análise das diferenças de proficiência entre grupos étnicos nas avaliações SPAECE",
+                            st.session_state.agregado_consultado,
+                            st.session_state.df_concatenado
+                        )
+                        st.markdown(analise)
+                elif not st.session_state.get('documentos_carregados', False):
+                    st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+                else:
+                    st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
         else:
             st.info("Sem dados válidos de proficiência por etnia após limpeza")
     else:
         st.info("Colunas de etnia não encontradas no conjunto de dados")
+    
     
     # Quebra de página antes da seção de NSE (removida para evitar páginas vazias)
     # st.markdown("""
@@ -2151,11 +4369,40 @@ else:
         """, unsafe_allow_html=True)
         
         # Só exibir o header se houver dados
-        st.markdown("""
-        <div class="report-header" style="background: #ff7f0e;">
+        st.markdown(f"""
+        <div class="report-header" style="background: linear-gradient(135deg, {COR_SECUNDARIA}, #e67e22, #d35400);">
             💰 PROFICIÊNCIA POR NÍVEL SOCIOECONÔMICO (NSE)
         </div>
         """, unsafe_allow_html=True)
+        
+        # Help para análise do gráfico
+        with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+            st.markdown("""
+            **💰 Proficiência por Nível Socioeconômico (NSE) - Informações Técnicas**
+            
+            **Construção do gráfico:**
+            - **Tipo:** Gráfico de barras agrupadas (grouped bar chart)
+            - **Eixo X:** Entidades (Estado, CREDE, Município, Escola)
+            - **Eixo Y:** Taxa de participação (0% a 100%)
+            - **Cores:** Baseadas na proficiência média de cada nível NSE
+            
+            **O que representa:**
+            - **Altura da barra:** Taxa de participação por nível NSE
+            - **Cor da barra:** Proficiência média do nível (escala dinâmica)
+            - **Níveis NSE:** NSE 1 (mais baixo) a NSE 4 (mais alto)
+            
+            **Como ler:**
+            - **Altura:** Percentual de participação na avaliação
+            - **Cor:** Nível de proficiência (🟠 Baixa, 🟡 Média, 🟢 Alta)
+            - **Legenda:** Escala de proficiência dinâmica
+            - **Hover:** Valores específicos de participação e proficiência
+            
+            **Dados disponíveis:**
+            - **Taxa de Participação:** Percentual de alunos que participaram
+            - **Proficiência Média:** Pontuação média do nível NSE
+            - **Número de Alunos:** Quantidade de estudantes por nível
+            """)
+        
         df_nse = df_concat[colunas_nse_disponiveis].copy()
         
         colunas_valores_nse = ['VL_NSE1', 'VL_NSE2', 'VL_NSE3', 'VL_NSE4', 
@@ -2239,10 +4486,10 @@ else:
                 
                 # Categorias de NSE
                 categorias_nse = {
-                     'NSE 1 (Mais Baixo)': {'taxa': 'Taxa NSE 1', 'prof': 'Proficiência NSE 1 (Mais Baixo)', 'numero': 'Número NSE 1', 'cor_base': '#d62728'},
-                     'NSE 2': {'taxa': 'Taxa NSE 2', 'prof': 'Proficiência NSE 2', 'numero': 'Número NSE 2', 'cor_base': '#ff7f0e'},
-                     'NSE 3': {'taxa': 'Taxa NSE 3', 'prof': 'Proficiência NSE 3', 'numero': 'Número NSE 3', 'cor_base': '#2ca02c'},
-                     'NSE 4 (Mais Alto)': {'taxa': 'Taxa NSE 4', 'prof': 'Proficiência NSE 4 (Mais Alto)', 'numero': 'Número NSE 4', 'cor_base': '#2ca02c'}
+                     'NSE 1 (Mais Baixo)': {'taxa': 'Taxa NSE 1', 'prof': 'Proficiência NSE 1 (Mais Baixo)', 'numero': 'Número NSE 1', 'cor_base': COR_DANGER},
+                     'NSE 2': {'taxa': 'Taxa NSE 2', 'prof': 'Proficiência NSE 2', 'numero': 'Número NSE 2', 'cor_base': COR_SECUNDARIA},
+                     'NSE 3': {'taxa': 'Taxa NSE 3', 'prof': 'Proficiência NSE 3', 'numero': 'Número NSE 3', 'cor_base': COR_PRIMARIA},
+                     'NSE 4 (Mais Alto)': {'taxa': 'Taxa NSE 4', 'prof': 'Proficiência NSE 4 (Mais Alto)', 'numero': 'Número NSE 4', 'cor_base': COR_SUCESSO}
                 }
                 
                 # Função para calcular cor baseada na proficiência
@@ -2299,7 +4546,7 @@ else:
                                         'Proficiência': proficiencia,
                                         'Numero': numero,
                                         'Cor': cor,
-                                        'Label': f"{cat_nome}<br>{taxa:.1f}%"
+                                        'Label': f"{cat_nome}<br>{taxa:.1f}%".replace('.', ',')
                                     })
                 
                 # Criar DataFrame dos dados
@@ -2330,11 +4577,11 @@ else:
                                 color=df_nse_cat['Cor'].tolist(),
                                 line=dict(color='rgba(0,0,0,0.3)', width=1)
                             ),
-                             text=[f"{n}<br>{t:.1f}%<br>Prof: {p:.0f}<br>N: {num:.0f}" for n, t, p, num in zip(df_nse_cat['NSE'], df_nse_cat['Taxa'], df_nse_cat['Proficiência'], df_nse_cat['Numero'])],
+                             text=[f"{n}<br>{t:.1f}%<br>Prof: {p:.0f}<br>N: {num:.0f}".replace('.', ',') for n, t, p, num in zip(df_nse_cat['NSE'], df_nse_cat['Taxa'], df_nse_cat['Proficiência'], df_nse_cat['Numero'])],
                              textposition='outside',
                              textfont=dict(size=12, family='Arial', color='black'),
                              textangle=-90,
-                            hovertemplate='<b style="font-size:18px">Tipo: %{x}</b><br><span style="font-size:16px">NSE: ' + nse + '<br>Taxa: %{y:.1f}%<br>Proficiência: %{customdata:.1f}</span><extra></extra>',
+                            hovertemplate='<b style="font-size:18px">Tipo: %{x}</b><br><span style="font-size:16px">NSE: ' + nse + '<br>Taxa: %{y:.1f}%<br>Proficiência: %{customdata:.1f}</span><extra></extra>'.replace('%{y:.1f}%', '%{y:.1f}%').replace('%{customdata:.1f}', '%{customdata:.1f}').replace('.', ','),
                             customdata=df_nse_cat['Proficiência'],
                             showlegend=False
                         ))
@@ -2346,7 +4593,7 @@ else:
                     fig_nse.update_layout(
                         title=dict(
                             text=f'📊 Taxa (altura) e Proficiência (cor) por NSE<br><sub style="font-size:14px;">🟠 Laranja = Proficiência Baixa | 🟡 Amarelo = Proficiência Média | 🟢 Verde = Proficiência Alta | Escala: {prof_min_nse:.0f} - {prof_max_nse:.0f}</sub>',
-                            font=dict(size=20, family='Arial Black')
+                            font=dict(size=18, family='Arial Black')
                         ),
                         xaxis_title=dict(
                             text='Tipo de Entidade',
@@ -2356,20 +4603,20 @@ else:
                             text='Taxa (%)',
                             font=dict(size=18)
                         ),
-                        font=dict(size=16),
-                        height=600,
+                        font=dict(size=14),
+                        height=450,
                         barmode='group',
                         bargap=0.2,
                         bargroupgap=0.15,
                         yaxis=dict(
                             range=[0, 110],
-                            tickfont=dict(size=16)
+                            tickfont=dict(size=14)
                         ),
                         showlegend=False,
                         xaxis=dict(
                             categoryorder='array',
                             categoryarray=tipos_disponiveis_nse,
-                            tickfont=dict(size=16)
+                            tickfont=dict(size=14)
                         ),
                         hoverlabel=dict(
                             font_size=20,
@@ -2392,6 +4639,31 @@ else:
                 mime="text/csv",
                 key="download_nse"
             )
+            
+            # Análise com Groq
+            with st.expander("🤖 Análise Inteligente - Proficiência por NSE", expanded=False):
+                if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                    st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                    
+                    # Criar chave única baseada nos filtros atuais
+                    etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                    disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                    key_analise = f"analise_nse_{etapa_filtro}_{disciplina_filtro}"
+                    
+                    if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                        with st.spinner("🤖 Analisando dados com IA..."):
+                            analise = analisar_dataframe_com_groq(
+                                df_nse, 
+                                "Proficiência por NSE", 
+                            "Análise das diferenças de proficiência entre níveis socioeconômicos nas avaliações SPAECE",
+                            st.session_state.agregado_consultado,
+                            st.session_state.df_concatenado
+                        )
+                        st.markdown(analise)
+                elif not st.session_state.get('documentos_carregados', False):
+                    st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+                else:
+                    st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
     
     # ==================== DADOS CONTEXTUAIS - SEXO ====================
     colunas_sexo = ['TP_ENTIDADE', 'DC_TIPO_ENTIDADE', 'NM_ENTIDADE', 'VL_FILTRO_DISCIPLINA', 'VL_FILTRO_ETAPA', 'VL_FEMININO', 
@@ -2406,10 +4678,39 @@ else:
         """, unsafe_allow_html=True)
         
         st.markdown("""
-        <div class="report-header" style="background: #2ca02c;">
+        <div class="report-header" style="background: linear-gradient(135deg, #2ca02c, #1e7e34, #155724);">
             👫 PROFICIÊNCIA POR SEXO
         </div>
         """, unsafe_allow_html=True)
+        
+        # Help para análise do gráfico
+        with st.expander("ℹ️ Como analisar este gráfico", expanded=False):
+            st.markdown("""
+            **👫 Proficiência por Sexo - Informações Técnicas**
+            
+            **Construção do gráfico:**
+            - **Tipo:** Gráfico de barras agrupadas (grouped bar chart)
+            - **Eixo X:** Entidades (Estado, CREDE, Município, Escola)
+            - **Eixo Y:** Taxa de participação (0% a 100%)
+            - **Cores:** Baseadas na proficiência média de cada sexo
+            
+            **O que representa:**
+            - **Altura da barra:** Taxa de participação por sexo
+            - **Cor da barra:** Proficiência média do sexo (escala dinâmica)
+            - **Grupos:** Feminino e Masculino
+            
+            **Como ler:**
+            - **Altura:** Percentual de participação na avaliação
+            - **Cor:** Nível de proficiência (🟠 Baixa, 🟡 Média, 🟢 Alta)
+            - **Legenda:** Escala de proficiência dinâmica
+            - **Hover:** Valores específicos de participação e proficiência
+            
+            **Dados disponíveis:**
+            - **Taxa de Participação:** Percentual de alunos que participaram
+            - **Proficiência Média:** Pontuação média por sexo
+            - **Número de Alunos:** Quantidade de estudantes por sexo
+            """)
+        
         df_sexo = df_concat[colunas_sexo_disponiveis].copy()
         
         colunas_valores_sexo = ['VL_FEMININO', 'VL_MASCULINO', 'NU_FEMININO', 
@@ -2483,8 +4784,8 @@ else:
                 
                 # Categorias de Sexo
                 categorias_sexo = {
-                    'Feminino': {'taxa': 'Taxa Feminino', 'prof': 'Proficiência Feminino', 'numero': 'Número Feminino', 'cor_base': '#ff7f0e'},
-                    'Masculino': {'taxa': 'Taxa Masculino', 'prof': 'Proficiência Masculino', 'numero': 'Número Masculino', 'cor_base': '#2ca02c'}
+                    'Feminino': {'taxa': 'Taxa Feminino', 'prof': 'Proficiência Feminino', 'numero': 'Número Feminino', 'cor_base': COR_SECUNDARIA},
+                    'Masculino': {'taxa': 'Taxa Masculino', 'prof': 'Proficiência Masculino', 'numero': 'Número Masculino', 'cor_base': COR_PRIMARIA}
                 }
                 
                 # Função para calcular cor baseada na proficiência
@@ -2541,7 +4842,7 @@ else:
                                         'Proficiência': proficiencia,
                                         'Numero': numero,
                                         'Cor': cor,
-                                        'Label': f"{cat_nome}<br>{taxa:.1f}%"
+                                        'Label': f"{cat_nome}<br>{taxa:.1f}%".replace('.', ',')
                                     })
                 
                 # Criar DataFrame dos dados
@@ -2572,11 +4873,11 @@ else:
                                 color=df_sexo_cat['Cor'].tolist(),
                                 line=dict(color='rgba(0,0,0,0.3)', width=1)
                             ),
-                            text=[f"{s}<br>{t:.1f}%<br>Prof: {p:.0f}<br>N: {num:.0f}" for s, t, p, num in zip(df_sexo_cat['Sexo'], df_sexo_cat['Taxa'], df_sexo_cat['Proficiência'], df_sexo_cat['Numero'])],
+                            text=[f"{s}<br>{t:.1f}%<br>Prof: {p:.0f}<br>N: {num:.0f}".replace('.', ',') for s, t, p, num in zip(df_sexo_cat['Sexo'], df_sexo_cat['Taxa'], df_sexo_cat['Proficiência'], df_sexo_cat['Numero'])],
                             textposition='outside',
                             textfont=dict(size=12, family='Arial', color='black'),
                             textangle=-90,
-                            hovertemplate='<b style="font-size:18px">Tipo: %{x}</b><br><span style="font-size:16px">Sexo: ' + sexo + '<br>Taxa: %{y:.1f}%<br>Proficiência: %{customdata:.1f}</span><extra></extra>',
+                            hovertemplate='<b style="font-size:18px">Tipo: %{x}</b><br><span style="font-size:16px">Sexo: ' + sexo + '<br>Taxa: %{y:.1f}%<br>Proficiência: %{customdata:.1f}</span><extra></extra>'.replace('%{y:.1f}%', '%{y:.1f}%').replace('%{customdata:.1f}', '%{customdata:.1f}').replace('.', ','),
                             customdata=df_sexo_cat['Proficiência'],
                             showlegend=False
                         ))
@@ -2588,7 +4889,7 @@ else:
                     fig_sexo.update_layout(
                         title=dict(
                             text=f'👫 Taxa (altura) e Proficiência (cor) por Sexo<br><sub style="font-size:14px;">🟠 Laranja = Proficiência Baixa | 🟡 Amarelo = Proficiência Média | 🟢 Verde = Proficiência Alta | Escala: {prof_min_sexo:.0f} - {prof_max_sexo:.0f}</sub>',
-                            font=dict(size=20, family='Arial Black')
+                            font=dict(size=18, family='Arial Black')
                         ),
                         xaxis_title=dict(
                             text='Tipo de Entidade',
@@ -2598,20 +4899,20 @@ else:
                             text='Taxa (%)',
                             font=dict(size=18)
                         ),
-                        font=dict(size=16),
-                        height=600,
+                        font=dict(size=14),
+                        height=450,
                         barmode='group',
                         bargap=0.2,
                         bargroupgap=0.15,
                         yaxis=dict(
                             range=[0, 110],
-                            tickfont=dict(size=16)
+                            tickfont=dict(size=14)
                         ),
                         showlegend=False,
                         xaxis=dict(
                             categoryorder='array',
                             categoryarray=tipos_disponiveis_sexo,
-                            tickfont=dict(size=16)
+                            tickfont=dict(size=14)
                         ),
                         hoverlabel=dict(
                             font_size=20,
@@ -2634,6 +4935,31 @@ else:
                 mime="text/csv",
                 key="download_sexo"
             )
+            
+            # Análise com Groq
+            with st.expander("🤖 Análise Inteligente - Proficiência por Sexo", expanded=False):
+                if st.session_state.get('documentos_carregados', False) and st.session_state.get('ia_ativa', True):
+                    st.error("⚠️ **Lembrete:** Esta análise é gerada por inteligência artificial e pode conter erros ou imprecisões. **Esta funcionalidade está em fase de testes.** Use sempre seu julgamento profissional para validar as informações.")
+                    
+                    # Criar chave única baseada nos filtros atuais
+                    etapa_filtro = st.session_state.get('etapa_selecionada', 'Todas')
+                    disciplina_filtro = st.session_state.get('disciplina_selecionada', 'Todas')
+                    key_analise = f"analise_sexo_{etapa_filtro}_{disciplina_filtro}"
+                    
+                    if st.button("🔍 Analisar Dados com IA", key=key_analise):
+                        with st.spinner("🤖 Analisando dados com IA..."):
+                            analise = analisar_dataframe_com_groq(
+                                df_sexo, 
+                                "Proficiência por Sexo", 
+                            "Análise das diferenças de proficiência entre gêneros nas avaliações SPAECE",
+                            st.session_state.agregado_consultado,
+                            st.session_state.df_concatenado
+                        )
+                        st.markdown(analise)
+                elif not st.session_state.get('documentos_carregados', False):
+                    st.warning("⚠️ **Análise IA indisponível:** Carregue as bases de dados (DCRC e BNCC) para ativar as análises inteligentes.")
+                else:
+                    st.warning("⚠️ **Análise IA desativada:** Use o botão no painel lateral para ativar as análises inteligentes.")
         else:
             st.info("Sem dados válidos de proficiência por sexo após limpeza")
     else:
@@ -2641,7 +4967,7 @@ else:
     
     # ==================== RESUMO EXECUTIVO ====================
     st.markdown("""
-    <div class="report-header" style="background: #2ca02c;">
+    <div class="report-header" style="background: linear-gradient(135deg, #2ca02c, #1e7e34, #155724);">
         📋 RESUMO EXECUTIVO
     </div>
     """, unsafe_allow_html=True)
@@ -2659,7 +4985,7 @@ else:
         ">
             <p><strong>Data de Geração:</strong> {}</p>
             <p><strong>Agregado Consultado:</strong> {}</p>
-            <p><strong>Total de Registros:</strong> {:,}</p>
+            <p><strong>Total de Registros:</strong> {}</p>
             <p><strong>Período de Dados:</strong> Sistema Permanente de Avaliação da Educação Básica do Ceará (SPAECE)</p>
             <p><strong>Escopo:</strong> Análise educacional com foco em proficiência, participação e desempenho dos estudantes</p>
         </div>
@@ -2667,13 +4993,13 @@ else:
     """.format(
         pd.Timestamp.now().strftime("%d/%m/%Y às %H:%M"),
         st.session_state.agregado_consultado if st.session_state.agregado_consultado else "N/A",
-        len(st.session_state.df_concatenado) if st.session_state.df_concatenado is not None else 0
+        f"{len(st.session_state.df_concatenado):,}".replace(',', '.') if st.session_state.df_concatenado is not None else 0
     ), unsafe_allow_html=True)
     
     # Instruções de impressão
     st.markdown("""
     <div class="report-card">
-        <div class="report-card-header" style="border-bottom-color: #ff7f0e;">
+        <div class="report-card-header" style="border-bottom-color: #f59c00;">
             🖨️ INSTRUÇÕES PARA IMPRESSÃO
         </div>
         <div style="

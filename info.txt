@@ -1,0 +1,3 @@
+incluí a analise por IA(sem inserção de documentos para análise), e a escala de o a 1000.
+Corrigi as o separador de decimal. Troquei ponto por vírgula.
+Indiquei que a IA esta em fase de testes.
