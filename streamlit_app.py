@@ -1805,7 +1805,7 @@ except Exception as e:
 
 # Configuração da página
 st.set_page_config(
-    page_title="Consulta API SPAECE", 
+    page_title="Painel CECOM 1 - Resultados do SPAECE 2024", 
     layout="wide",
     page_icon="📊",
     initial_sidebar_state="expanded"
